@@ -11,12 +11,32 @@ import { World } from '../world/World.ts';
 import { farthestNest, generateMap } from '../world/MapGenerator.ts';
 import { Pathfinder } from '../world/Pathfinder.ts';
 import { randomSeed } from '../util/Random.ts';
+import { HUD } from '../ui/HUD.ts';
+import { BuildMenu } from '../ui/BuildMenu.ts';
+import { ECONOMY } from '../config/Tuning.ts';
+import type { Building, BuildingKind } from '../entities/Building.ts';
+import { Barracks } from '../entities/Barracks.ts';
+import { Market } from '../entities/Market.ts';
+import { Blacksmith } from '../entities/Blacksmith.ts';
+import type { BuildingSlot } from '../entities/BuildingSlot.ts';
 
 export interface HudBinding {
   fps: HTMLElement;
   camera: HTMLElement;
   seed: HTMLElement;
+  gold: HTMLElement;
 }
+
+export interface GameBindings {
+  hud: HudBinding;
+  uiRoot: HTMLElement;
+}
+
+const BUILDING_COSTS: Record<BuildingKind, number> = {
+  barracks: ECONOMY.barracksCost,
+  market: ECONOMY.marketCost,
+  blacksmith: ECONOMY.blacksmithCost,
+};
 
 export class Game {
   private readonly host: HTMLElement;
@@ -33,6 +53,16 @@ export class Game {
   private readonly world: World;
   private readonly pathfinder: Pathfinder;
 
+  private readonly hudView: HUD;
+  private readonly buildMenu: BuildMenu;
+  private pendingKind: BuildingKind | null = null;
+  /** Cached defaults for slot meshes so we can restore after highlight. */
+  private readonly slotDefaults = new WeakMap<
+    THREE.Mesh,
+    { scaleX: number; scaleZ: number; opacity: number }
+  >();
+  private buildingIdCounter = 0;
+
   private rafId = 0;
   private running = false;
   private frameCounter = 0;
@@ -48,9 +78,9 @@ export class Game {
   private pointerDownY = 0;
   private pointerDownButton = -1;
 
-  constructor(host: HTMLElement, hud: HudBinding, seed?: number) {
+  constructor(host: HTMLElement, bindings: GameBindings, seed?: number) {
     this.host = host;
-    this.hud = hud;
+    this.hud = bindings.hud;
 
     const bundle = createRenderer(host);
     this.scene = bundle.scene;
@@ -69,6 +99,12 @@ export class Game {
     this.world = new World(map);
     this.scene.add(this.world.root);
     this.pathfinder = new Pathfinder(this.world.navGrid);
+
+    // --- UI ---
+    this.hudView = new HUD(this.hud.gold);
+    this.buildMenu = new BuildMenu(bindings.uiRoot);
+    this.buildMenu.onSelect = (kind) => this.beginPlacement(kind);
+    this.buildMenu.onCancel = () => this.cancelPlacement();
 
     // --- Camera ---
     const aspect = host.clientWidth / host.clientHeight;
@@ -90,6 +126,10 @@ export class Game {
       const dy = e.clientY - this.pointerDownY;
       if (dx * dx + dy * dy > 4 * 4) return; // drag → ignore
       const hit = pickAt(e.clientX, e.clientY, this.canvas, this.cam.camera, this.world.root);
+      if (this.pendingKind !== null) {
+        this.handleBuildPick(hit);
+        return;
+      }
       if (hit) {
         // eslint-disable-next-line no-console
         console.log('[pick]', hit.type, hit.id, '@', hit.point.x.toFixed(1), hit.point.z.toFixed(1));
@@ -138,6 +178,8 @@ export class Game {
     this.canvas.removeEventListener('pointerdown', this.onPointerDownPick);
     this.canvas.removeEventListener('pointerup', this.onPointerUpPick);
     this.input.dispose();
+    this.buildMenu.dispose();
+    for (const b of this.state.buildings) b.dispose();
     this.world.dispose();
     this.disposeRenderer();
   }
@@ -148,11 +190,13 @@ export class Game {
     });
     this.input.update(frameDt);
     this.renderer.render(this.scene, this.cam.camera);
+    this.hudView.update(this.state.treasury.gold);
+    this.buildMenu.setGold(this.state.treasury.gold);
     this.updateHud(frameDt);
   }
 
-  private update(_dt: number): void {
-    // M2: no simulation logic yet.
+  private update(dt: number): void {
+    this.state.treasury.tick(dt);
   }
 
   private updateHud(frameDt: number): void {
@@ -168,6 +212,117 @@ export class Game {
     const t = this.cam.target;
     this.hud.camera.textContent = `${t.x.toFixed(0)}, ${t.z.toFixed(0)}`;
   }
+
+  // ---------------------------------------------------------------------------
+  // Placement flow (M3)
+  // ---------------------------------------------------------------------------
+
+  private beginPlacement(kind: BuildingKind): void {
+    if (this.state.treasury.gold < BUILDING_COSTS[kind]) return;
+    this.pendingKind = kind;
+    this.highlightFreeSlots(true);
+  }
+
+  private cancelPlacement(): void {
+    if (this.pendingKind === null) return;
+    this.pendingKind = null;
+    this.highlightFreeSlots(false);
+  }
+
+  private handleBuildPick(
+    hit: ReturnType<typeof pickAt>,
+  ): void {
+    if (!hit || hit.type !== 'slot' || this.pendingKind === null) return;
+    const kind = this.pendingKind;
+    const slot = this.state.slots.find((s) => s.id === hit.id);
+    if (!slot || slot.occupied) return;
+    const cost = BUILDING_COSTS[kind];
+    if (!this.state.treasury.spend(cost)) return;
+
+    const building = this.instantiateBuilding(kind, slot);
+    slot.occupied = true;
+    slot.building = building;
+    this.state.buildings.push(building);
+    this.world.root.add(building.mesh);
+    this.hideSlotMarker(slot);
+
+    this.pendingKind = null;
+    this.highlightFreeSlots(false);
+  }
+
+  private instantiateBuilding(kind: BuildingKind, slot: BuildingSlot): Building {
+    this.buildingIdCounter += 1;
+    const id = `${kind}-${this.buildingIdCounter}`;
+    const position = { x: slot.x, z: slot.z };
+    switch (kind) {
+      case 'barracks':
+        return new Barracks(id, slot.id, position);
+      case 'market':
+        return new Market(id, slot.id, position);
+      case 'blacksmith':
+        return new Blacksmith(id, slot.id, position);
+    }
+  }
+
+  private highlightFreeSlots(active: boolean): void {
+    const slotsGroup = this.world.root.getObjectByName('slots');
+    if (!slotsGroup) return;
+    const occupied = new Set(this.state.slots.filter((s) => s.occupied).map((s) => s.id));
+    for (const child of slotsGroup.children) {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) continue;
+      const ud = mesh.userData as { type?: string; id?: string };
+      if (ud.type !== 'slot' || !ud.id) continue;
+      if (occupied.has(ud.id)) continue;
+
+      let defaults = this.slotDefaults.get(mesh);
+      if (!defaults) {
+        const baseMat = mesh.material as THREE.MeshBasicMaterial;
+        defaults = {
+          scaleX: mesh.scale.x,
+          scaleZ: mesh.scale.z,
+          opacity: baseMat.opacity,
+        };
+        this.slotDefaults.set(mesh, defaults);
+      }
+
+      if (active) {
+        mesh.scale.x = defaults.scaleX * 1.3;
+        mesh.scale.z = defaults.scaleZ * 1.3;
+        // Clone the material so scaling opacity on one slot doesn't bleed
+        // across the shared base material. Mark the clone so we dispose only
+        // highlights, not the shared original.
+        if (!(mesh.material as { __m3HighlightClone?: boolean }).__m3HighlightClone) {
+          const cloned = (mesh.material as THREE.MeshBasicMaterial).clone();
+          (cloned as { __m3HighlightClone?: boolean }).__m3HighlightClone = true;
+          mesh.material = cloned;
+        }
+        (mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(1, defaults.opacity + 0.4);
+      } else {
+        mesh.scale.x = defaults.scaleX;
+        mesh.scale.z = defaults.scaleZ;
+        const mat = mesh.material as THREE.MeshBasicMaterial & { __m3HighlightClone?: boolean };
+        if (mat.__m3HighlightClone) {
+          mat.opacity = defaults.opacity;
+        }
+      }
+    }
+  }
+
+  private hideSlotMarker(slot: BuildingSlot): void {
+    const slotsGroup = this.world.root.getObjectByName('slots');
+    if (!slotsGroup) return;
+    for (const child of slotsGroup.children) {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) continue;
+      const ud = mesh.userData as { type?: string; id?: string };
+      if (ud.type !== 'slot' || ud.id !== slot.id) continue;
+      mesh.visible = false;
+      return;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
 
   private toggleDebugPath(): void {
     if (this.debugPathNode) {

@@ -4,12 +4,19 @@ const host = document.getElementById('app');
 const fpsEl = document.getElementById('hud-fps');
 const camEl = document.getElementById('hud-camera');
 const seedEl = document.getElementById('hud-seed');
+const goldEl = document.getElementById('hud-gold');
+const uiRoot = document.getElementById('ui-root');
 
-if (!host || !fpsEl || !camEl || !seedEl) {
-  throw new Error('Missing required DOM nodes: #app, #hud-fps, #hud-camera, #hud-seed');
+if (!host || !fpsEl || !camEl || !seedEl || !goldEl || !uiRoot) {
+  throw new Error(
+    'Missing required DOM nodes: #app, #hud-fps, #hud-camera, #hud-seed, #hud-gold, #ui-root',
+  );
 }
 
-const game = new Game(host, { fps: fpsEl, camera: camEl, seed: seedEl });
+const game = new Game(host, {
+  hud: { fps: fpsEl, camera: camEl, seed: seedEl, gold: goldEl },
+  uiRoot,
+});
 game.start();
 
 if (import.meta.hot) {
