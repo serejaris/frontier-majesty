@@ -10,6 +10,11 @@
         --hud-bg: rgba(10, 14, 20, 0.82);
         --hud-fg: #e6efff;
         --hud-accent: #ffcc66;
+        --panel-bg: rgba(14, 18, 26, 0.92);
+        --panel-border: rgba(255, 255, 255, 0.1);
+        --panel-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+        --victory: #b2f0a2;
+        --defeat: #ff8f7a;
       }
       html,
       body {
@@ -63,6 +68,188 @@
       #hud .chip .value {
         color: var(--hud-accent);
       }
+
+      /* Pause chip — top-center, red accent, only visible when paused. */
+      #hud-pause {
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: none;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        background: rgba(120, 20, 20, 0.82);
+        border: 1px solid rgba(255, 120, 110, 0.4);
+        border-radius: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 1.5px;
+        color: #ffd8cf;
+        text-transform: uppercase;
+        user-select: none;
+        pointer-events: none;
+        z-index: 20;
+      }
+
+      /* World overlay — container for HP bars / status icons, full viewport. */
+      #world-overlay {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        overflow: hidden;
+        z-index: 5;
+      }
+      .hp-bar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 48px;
+        height: 4px;
+        background: rgba(0, 0, 0, 0.6);
+        border: 1px solid rgba(0, 0, 0, 0.85);
+        border-radius: 2px;
+        overflow: hidden;
+        will-change: transform;
+      }
+      .hp-bar-fill {
+        height: 100%;
+        width: 100%;
+        background: #4caf50;
+        transition: width 120ms ease-out;
+      }
+      .status-icon {
+        position: absolute;
+        top: 0;
+        left: 0;
+        padding: 1px 5px;
+        background: rgba(10, 14, 20, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 3px;
+        font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        color: var(--hud-accent);
+        white-space: nowrap;
+        user-select: none;
+        will-change: transform;
+      }
+
+      /* Hero card — top-right. */
+      .hero-card {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        width: 220px;
+        padding: 10px 12px;
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 8px;
+        box-shadow: var(--panel-shadow);
+        font-size: 12px;
+        z-index: 15;
+        user-select: none;
+      }
+      .hero-card-title {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.8px;
+        color: var(--hud-accent);
+        padding-bottom: 6px;
+        margin-bottom: 8px;
+        border-bottom: 1px solid var(--panel-border);
+      }
+      .hero-card-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        row-gap: 4px;
+        column-gap: 8px;
+      }
+      .hero-card-label {
+        opacity: 0.6;
+      }
+      .hero-card-value {
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        color: var(--hud-fg);
+      }
+
+      /* End screen modal. */
+      .end-screen {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.72);
+        z-index: 40;
+        user-select: none;
+      }
+      .end-screen-card {
+        min-width: 320px;
+        max-width: 440px;
+        padding: 28px 32px;
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 12px;
+        box-shadow: var(--panel-shadow);
+        text-align: center;
+      }
+      .end-screen-title {
+        font-size: 38px;
+        font-weight: 800;
+        letter-spacing: 4px;
+        margin-bottom: 20px;
+      }
+      .end-screen-title.is-victory {
+        color: var(--victory);
+        text-shadow: 0 0 18px rgba(178, 240, 162, 0.3);
+      }
+      .end-screen-title.is-defeat {
+        color: var(--defeat);
+        text-shadow: 0 0 18px rgba(255, 143, 122, 0.3);
+      }
+      .end-screen-stats {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-bottom: 22px;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      .end-screen-stat {
+        display: flex;
+        justify-content: space-between;
+        padding: 4px 0;
+        border-bottom: 1px dashed rgba(255, 255, 255, 0.08);
+      }
+      .end-screen-stat-label {
+        opacity: 0.6;
+      }
+      .end-screen-stat-value {
+        color: var(--hud-accent);
+      }
+      .end-screen-button {
+        padding: 10px 20px;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        color: #0b0f14;
+        background: var(--hud-accent);
+        border: 0;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: transform 80ms ease-out, box-shadow 80ms ease-out;
+      }
+      .end-screen-button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 14px rgba(255, 204, 102, 0.3);
+      }
+      .end-screen-button:active {
+        transform: translateY(0);
+      }
     </style>
   </head>
   <body>
@@ -72,8 +259,10 @@
       <span class="chip"><span class="label">camera</span><span class="value" id="hud-camera">—</span></span>
       <span class="chip"><span class="label">seed</span><span class="value" id="hud-seed">—</span></span>
       <span class="chip"><span class="label">pan</span><span class="value">WASD · drag MMB · edge</span></span>
-      <span class="chip"><span class="label">debug</span><span class="value">P = path</span></span>
+      <span class="chip"><span class="label">debug</span><span class="value">P path · Space pause · H hero · L hp · U end</span></span>
     </div>
+    <div id="world-overlay"></div>
+    <div id="hud-pause">Paused</div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

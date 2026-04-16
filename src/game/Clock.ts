@@ -34,6 +34,19 @@ export class Clock {
     return frame;
   }
 
+  /**
+   * Advance wall-clock without running any fixed-step updates (pause path).
+   * Returns raw frame dt so render-frame systems (overlay projection, camera
+   * panning, hit-flash animation) still get a usable delta.
+   */
+  tickIdle(): number {
+    const now = performance.now();
+    const frame = Math.min((now - this.last) / 1000, this.maxFrame);
+    this.last = now;
+    // Don't touch the accumulator — when the player unpauses, we resume cleanly.
+    return frame;
+  }
+
   get alpha(): number {
     return this.accumulator / this.fixedStep;
   }
