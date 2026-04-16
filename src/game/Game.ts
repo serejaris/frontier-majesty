@@ -20,12 +20,20 @@ import { createRng, randomSeed, type Rng } from '../util/Random.ts';
 import { HUD } from '../ui/HUD.ts';
 import { BuildMenu } from '../ui/BuildMenu.ts';
 import { PerkPicker } from '../ui/PerkPicker.ts';
-import { ECONOMY } from '../config/Tuning.ts';
+import { RecruitPanel } from '../ui/RecruitPanel.ts';
+import { ECONOMY, HEROES, MONSTERS } from '../config/Tuning.ts';
 import type { Building, BuildingKind } from '../entities/Building.ts';
 import { Barracks } from '../entities/Barracks.ts';
 import { Market } from '../entities/Market.ts';
 import { Blacksmith } from '../entities/Blacksmith.ts';
 import type { BuildingSlot } from '../entities/BuildingSlot.ts';
+import { Hero, type HeroKind } from '../entities/Hero.ts';
+import { Warrior } from '../entities/Warrior.ts';
+import { Archer } from '../entities/Archer.ts';
+import { Monster } from '../entities/Monster.ts';
+import { Nest } from '../entities/Nest.ts';
+import { CombatSystem } from '../combat/CombatSystem.ts';
+import { xpToNextLevel } from '../progression/Leveling.ts';
 
 export interface HudBinding {
   fps: HTMLElement;
@@ -51,6 +59,11 @@ const BUILDING_COSTS: Record<BuildingKind, number> = {
   blacksmith: ECONOMY.blacksmithCost,
 };
 
+const HERO_COSTS: Record<HeroKind, number> = {
+  warrior: ECONOMY.warriorCost,
+  archer: ECONOMY.archerCost,
+};
+
 export class Game {
   private readonly host: HTMLElement;
   private readonly hud: HudBinding;
@@ -65,6 +78,7 @@ export class Game {
   private readonly state: GameState;
   private readonly world: World;
   private readonly pathfinder: Pathfinder;
+  private readonly combatRng: Rng;
 
   private readonly hudView: HUD;
   private readonly buildMenu: BuildMenu;
@@ -74,6 +88,7 @@ export class Game {
     { scaleX: number; scaleZ: number; opacity: number }
   >();
   private buildingIdCounter = 0;
+  private heroIdCounter = 0;
 
   private readonly perkPicker: PerkPicker;
   private readonly perkRng: Rng;
@@ -85,6 +100,10 @@ export class Game {
   private readonly statusIcons: StatusIcons;
   private readonly hitFlash: HitFlash;
   readonly ui: GameUi;
+
+  private readonly combat = new CombatSystem();
+  private readonly recruitPanel: RecruitPanel;
+  private recruitBarracks: Barracks | null = null;
 
   private rafId = 0;
   private running = false;
@@ -124,11 +143,41 @@ export class Game {
     this.world = new World(map);
     this.scene.add(this.world.root);
     this.pathfinder = new Pathfinder(this.world.navGrid);
+    this.combatRng = createRng((useSeed ^ 0xc0ffee) >>> 0);
+
+    // Seed live Nest entities from the map placements — these own spawn timers.
+    const nestsGroup = this.world.root.getObjectByName('nests') as THREE.Group | null;
+    for (const np of map.nests) {
+      const nest = new Nest(np.id, np.tier, np.x, np.z);
+      // We use the pre-placed World visual for the nest, not the Nest entity's own
+      // mesh — swap: replace our fresh mesh with the one already rendered. This
+      // avoids double-rendering AND keeps hit-flashes (which drive on the live
+      // mesh handed to CombatSystem) affecting what the player sees.
+      if (nestsGroup) {
+        const existing = nestsGroup.children.find(
+          (c) => (c.userData as { id?: string }).id === np.id,
+        );
+        if (existing) {
+          nestsGroup.remove(existing);
+        }
+      }
+      (nestsGroup ?? this.world.root).add(nest.mesh);
+      this.state.nests.push(nest);
+    }
 
     this.hudView = new HUD(this.hud.gold);
     this.buildMenu = new BuildMenu(bindings.uiRoot);
     this.buildMenu.onSelect = (kind) => this.beginPlacement(kind);
     this.buildMenu.onCancel = () => this.cancelPlacement();
+
+    this.recruitPanel = new RecruitPanel({
+      mountHost: bindings.uiRoot,
+      canAfford: (kind) => this.canAffordHire(kind),
+      atCap: () => this.state.heroes.length >= HEROES.cap,
+      hireHint: () => this.hireHintText(),
+      onRecruit: (kind) => this.recruit(kind),
+      onClose: () => this.closeRecruitPanel(),
+    });
 
     this.perkRng = createRng((useSeed ^ 0xbeefcafe) >>> 0);
     this.perkPicker = new PerkPicker();
@@ -150,6 +199,9 @@ export class Game {
       }),
     };
 
+    // Seed nest HP bars up-front.
+    for (const nest of this.state.nests) this.registerNestOverlays(nest);
+
     this.onPointerDownPick = (e: PointerEvent) => {
       if (e.button !== 0) return;
       this.pointerDownX = e.clientX;
@@ -167,10 +219,27 @@ export class Game {
         this.handleBuildPick(hit);
         return;
       }
+      // Clicking a built Barracks opens the Recruit panel.
+      if (hit && hit.type === 'building') {
+        const bld = this.state.buildings.find((b) => b.id === hit.id);
+        if (bld && bld.kind === 'barracks') {
+          this.openRecruitPanel(bld as Barracks);
+          return;
+        }
+      }
+      // Clicking a hero shows the hero card.
+      if (hit && hit.type === 'hero') {
+        const hero = this.state.heroes.find((h) => h.id === hit.id);
+        if (hero) {
+          this.showHeroCard(hero);
+          return;
+        }
+      }
       if (hit) {
         // eslint-disable-next-line no-console
         console.log('[pick]', hit.type, hit.id, '@', hit.point.x.toFixed(1), hit.point.z.toFixed(1));
       } else {
+        this.closeRecruitPanel();
         // eslint-disable-next-line no-console
         console.log('[pick] none');
       }
@@ -201,8 +270,8 @@ export class Game {
           seed: this.state.seed,
           durationSec: 630,
           perks: ['Royal Tax'],
-          heroesAlive: 3,
-          nestsDestroyed: 5,
+          heroesAlive: this.state.heroes.length,
+          nestsDestroyed: this.state.nestsDestroyed,
         });
       }
     };
@@ -240,6 +309,7 @@ export class Game {
     this.canvas.removeEventListener('pointerup', this.onPointerUpPick);
     this.input.dispose();
     this.buildMenu.dispose();
+    this.recruitPanel.dispose();
     for (const b of this.state.buildings) b.dispose();
     this.world.dispose();
     this.perkPicker.dispose();
@@ -271,11 +341,50 @@ export class Game {
     this.renderer.render(this.scene, this.cam.camera);
     this.hudView.update(this.state.treasury.gold);
     this.buildMenu.setGold(this.state.treasury.gold);
+    this.recruitPanel.refresh();
     this.updateHud(frameDt);
   }
 
   private update(dt: number): void {
+    this.state.simT += dt;
     this.state.treasury.tick(dt);
+
+    // Nest spawn timers.
+    for (const nest of this.state.nests) {
+      if (!nest.alive) continue;
+      const worldMonsterCount = this.state.monsters.length;
+      const spawned = nest.tickSpawn(this.state.simT, worldMonsterCount, this.combatRng);
+      if (spawned) {
+        this.registerMonster(spawned);
+      }
+    }
+
+    // Monsters act.
+    for (const m of this.state.monsters) {
+      m.update(dt, this.state.simT, this.state.heroes, this.combatRng);
+    }
+
+    // Heroes advance (movement + regen).
+    for (const h of this.state.heroes) {
+      h.update(dt, this.state, this.world.navGrid, this.pathfinder, this.state.simT);
+    }
+
+    // Combat resolves: targeting, attacks, deaths, rewards.
+    this.combat.tick(
+      {
+        simT: this.state.simT,
+        heroes: this.state.heroes,
+        monsters: this.state.monsters,
+        nests: this.state.nests,
+        perkMods: this.state.perkMods,
+        hitFlash: this.hitFlash,
+      },
+      {
+        onHeroDied: (hero) => this.onHeroDied(hero),
+        onMonsterDied: (m) => this.onMonsterDied(m),
+        onNestDestroyed: (n) => this.onNestDestroyed(n),
+      },
+    );
   }
 
   private updateHud(frameDt: number): void {
@@ -297,6 +406,7 @@ export class Game {
   private beginPlacement(kind: BuildingKind): void {
     if (this.state.treasury.gold < BUILDING_COSTS[kind]) return;
     this.pendingKind = kind;
+    this.closeRecruitPanel();
     this.highlightFreeSlots(true);
   }
 
@@ -392,6 +502,170 @@ export class Game {
       mesh.visible = false;
       return;
     }
+  }
+
+  // ---------- Recruit / Hero lifecycle (M4) ----------
+
+  private openRecruitPanel(barracks: Barracks): void {
+    this.recruitBarracks = barracks;
+    this.recruitPanel.show();
+  }
+
+  private closeRecruitPanel(): void {
+    if (!this.recruitPanel.isVisible()) return;
+    this.recruitBarracks = null;
+    this.recruitPanel.hide();
+  }
+
+  private canAffordHire(kind: HeroKind): boolean {
+    if (this.nextHireIsFree()) return true;
+    return this.state.treasury.gold >= HERO_COSTS[kind];
+  }
+
+  private nextHireIsFree(): boolean {
+    const period = this.state.perkMods.freeHirePeriod;
+    if (period <= 0) return false;
+    // The NEXT hire (recruitCount + 1). Free on every Nth = when (count+1) % period === 0.
+    return (this.state.recruitCount + 1) % period === 0;
+  }
+
+  private hireHintText(): string {
+    if (this.nextHireIsFree()) return 'Next hire free (Fast Muster).';
+    const period = this.state.perkMods.freeHirePeriod;
+    if (period > 0) {
+      const till = period - (this.state.recruitCount % period);
+      return `Fast Muster: free in ${till} hire(s).`;
+    }
+    return '';
+  }
+
+  private recruit(kind: HeroKind): void {
+    if (!this.recruitBarracks) return;
+    if (this.state.heroes.length >= HEROES.cap) return;
+
+    const free = this.nextHireIsFree();
+    const cost = HERO_COSTS[kind];
+    if (!free) {
+      if (!this.state.treasury.spend(cost)) return;
+    }
+
+    this.state.recruitCount += 1;
+    this.heroIdCounter += 1;
+    const id = `${kind}-${this.heroIdCounter}`;
+    // Small random offset so multiple recruits don't overlap.
+    const ang = this.combatRng.next() * Math.PI * 2;
+    const r = 24 + this.combatRng.next() * 18;
+    const bx = this.recruitBarracks.position.x;
+    const bz = this.recruitBarracks.position.z;
+    const position = { x: bx + Math.cos(ang) * r, z: bz + Math.sin(ang) * r };
+
+    const startLevel = Math.max(1, this.state.perkMods.heroStartLevel);
+    const hero: Hero = kind === 'warrior'
+      ? new Warrior(id, position, startLevel)
+      : new Archer(id, position, startLevel);
+    hero.startRally(this.state.simT);
+
+    // Anchor hero to barracks for engagement leash clamp.
+    hero.anchorX = bx;
+    hero.anchorZ = bz;
+
+    this.state.heroes.push(hero);
+    this.world.root.add(hero.mesh);
+    this.registerHeroOverlays(hero);
+  }
+
+  private registerHeroOverlays(hero: Hero): void {
+    this.healthBars.ensure(hero.id, () => hero.alive ? ({
+      worldX: hero.position.x,
+      worldZ: hero.position.z,
+      hp: hero.hp,
+      maxHp: hero.maxHp,
+      visible: true,
+    }) : null);
+    this.statusIcons.ensure(hero.id, () => {
+      if (!hero.alive) return null;
+      if (this.state.simT < hero.rallyUntil) {
+        return { worldX: hero.position.x, worldZ: hero.position.z, glyph: 'RALLY' };
+      }
+      const glyph = hero.inCombat && (this.state.simT - 0) >= 0 && hero.combatCooldown < 1.0
+        ? 'ATK'
+        : null;
+      return { worldX: hero.position.x, worldZ: hero.position.z, glyph };
+    });
+  }
+
+  private registerMonster(monster: Monster): void {
+    // Cap sanity.
+    if (this.state.monsters.length >= MONSTERS.worldCap) return;
+    this.state.monsters.push(monster);
+    this.world.root.add(monster.mesh);
+    this.healthBars.ensure(monster.id, () => monster.alive ? ({
+      worldX: monster.position.x,
+      worldZ: monster.position.z,
+      hp: monster.hp,
+      maxHp: monster.maxHp,
+      visible: true,
+    }) : null);
+    this.statusIcons.ensure(monster.id, () => {
+      if (!monster.alive) return null;
+      if (monster.state === 'aggro') {
+        return { worldX: monster.position.x, worldZ: monster.position.z, glyph: 'AGR' };
+      }
+      return { worldX: monster.position.x, worldZ: monster.position.z, glyph: null };
+    });
+  }
+
+  private registerNestOverlays(nest: Nest): void {
+    this.healthBars.ensure(nest.id, () => nest.alive ? ({
+      worldX: nest.position.x,
+      worldZ: nest.position.z,
+      hp: nest.hp,
+      maxHp: nest.maxHp,
+      visible: true,
+    }) : null);
+  }
+
+  private onHeroDied(hero: Hero): void {
+    // eslint-disable-next-line no-console
+    console.log('[hero died]', hero.id);
+    // Meshes use shared cached materials (toonMat/flatMat) — do not dispose
+    // individually here. World.dispose() handles bulk cleanup on exit.
+    this.world.root.remove(hero.mesh);
+    this.healthBars.remove(hero.id);
+    this.statusIcons.remove(hero.id);
+  }
+
+  private onMonsterDied(m: Monster): void {
+    this.world.root.remove(m.mesh);
+    this.healthBars.remove(m.id);
+    this.statusIcons.remove(m.id);
+  }
+
+  private onNestDestroyed(nest: Nest): void {
+    this.state.nestsDestroyed += 1;
+    // eslint-disable-next-line no-console
+    console.log('[nest destroyed]', nest.id, 'tier=', nest.tier);
+    // Surviving defenders keep their state — without a spawner they'll chase
+    // heroes/capital via their regular aggro→leash loop.
+    const parent = nest.mesh.parent ?? this.world.root;
+    parent.remove(nest.mesh);
+    this.healthBars.remove(nest.id);
+  }
+
+  private showHeroCard(hero: Hero): void {
+    this.ui.heroCard.show({
+      class: hero.kind,
+      level: hero.level,
+      hp: hero.hp,
+      maxHp: hero.maxHp,
+      hasPotion: false,
+      weaponTier: 0,
+      armorTier: 0,
+      personalGold: Math.floor(hero.personalGold),
+      aiState: this.state.simT < hero.rallyUntil ? 'rally' : hero.inCombat ? 'combat' : 'idle',
+      xp: Math.floor(hero.xp),
+      xpToNext: xpToNextLevel(hero.xp),
+    });
   }
 
   // ---------- Perks (M7) ----------

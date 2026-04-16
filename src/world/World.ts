@@ -1,29 +1,33 @@
 import * as THREE from 'three';
-import type { GeneratedMap, NestPlacement } from './MapGenerator.ts';
+import type { GeneratedMap } from './MapGenerator.ts';
 import { NavGrid } from './NavGrid.ts';
+import {
+  createCapitalMesh,
+  createNestMesh,
+  createObstacleMesh,
+} from '../rendering/Silhouettes.ts';
 
-export type PickableType = 'capital' | 'slot' | 'nest' | 'obstacle';
+export type PickableType =
+  | 'capital'
+  | 'slot'
+  | 'nest'
+  | 'obstacle'
+  | 'building'
+  | 'hero'
+  | 'monster';
 
 export interface PickableUserData {
   type: PickableType;
   id: string;
 }
 
-const NEST_RADIUS: Record<NestPlacement['tier'], number> = {
-  near: 44,
-  mid: 56,
-  far: 72,
-};
-
-const NEST_COLOR: Record<NestPlacement['tier'], number> = {
-  near: 0xc85040,
-  mid: 0xb03030,
-  far: 0x881f20,
-};
-
 /**
  * Holds the scene root for map entities and rebuilds it from a generated map.
- * Kept lean — subsequent milestones will swap placeholders for glTF (M9).
+ *
+ * M4: capital + nest visuals upgraded to M9 silhouettes (cap keep + dome nests).
+ * Obstacles get stone/tree silhouettes by deterministic per-obstacle choice.
+ * Build slot markers stay as primitives — the M3 placement pulse relies on
+ * MeshBasicMaterial opacity tricks and we keep that intact for now.
  */
 export class World {
   readonly root: THREE.Group;
@@ -35,6 +39,7 @@ export class World {
   private groupNests: THREE.Group;
   private groupObstacles: THREE.Group;
 
+  /** Explicit disposables created directly by World (slot disc etc.). */
   private readonly disposables: Array<THREE.Material | THREE.BufferGeometry> = [];
 
   constructor(map: GeneratedMap) {
@@ -73,23 +78,31 @@ export class World {
   dispose(): void {
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
+    // Silhouette factories create their own materials/geometries per call; walk
+    // descendants and dispose on cleanup.
+    this.root.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (!m.isMesh) return;
+      m.geometry.dispose();
+      const mat = m.material;
+      if (Array.isArray(mat)) mat.forEach((mm) => mm.dispose());
+      else mat.dispose();
+    });
   }
 
   private build(): void {
-    // --- Capital: tall yellow cylinder placeholder.
+    // --- Capital: M9 silhouette keep, userData preset by factory; override id.
     {
-      const geo = new THREE.CylinderGeometry(70, 80, 140, 18);
-      const mat = new THREE.MeshLambertMaterial({ color: 0xffcc55 });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(this.map.capital.x, 70, this.map.capital.z);
-      mesh.name = 'capital';
-      const ud: PickableUserData = { type: 'capital', id: 'capital' };
-      mesh.userData = ud;
-      this.groupCapital.add(mesh);
-      this.disposables.push(geo, mat);
+      const capital = createCapitalMesh();
+      capital.position.set(this.map.capital.x, 0, this.map.capital.z);
+      capital.name = 'capital';
+      (capital.userData as PickableUserData) = { type: 'capital', id: 'capital' };
+      // Propagate pickable tag to children so raycaster finds it via leaf meshes.
+      tagChildren(capital, 'capital', 'capital');
+      this.groupCapital.add(capital);
     }
 
-    // --- Build slots: translucent yellow discs.
+    // --- Build slots: translucent yellow discs (kept as primitives for M3 pulse).
     {
       const geo = new THREE.CircleGeometry(40, 24);
       geo.rotateX(-Math.PI / 2);
@@ -110,46 +123,34 @@ export class World {
       this.disposables.push(geo, mat);
     }
 
-    // --- Nests: red domes, radius by tier.
-    {
-      // Per-tier shared material; separate geos for each dome size.
-      const mats: Record<NestPlacement['tier'], THREE.Material> = {
-        near: new THREE.MeshLambertMaterial({ color: NEST_COLOR.near }),
-        mid: new THREE.MeshLambertMaterial({ color: NEST_COLOR.mid }),
-        far: new THREE.MeshLambertMaterial({ color: NEST_COLOR.far }),
-      };
-      for (const m of Object.values(mats)) this.disposables.push(m);
-
-      for (const n of this.map.nests) {
-        const r = NEST_RADIUS[n.tier];
-        const geo = new THREE.SphereGeometry(r, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2);
-        this.disposables.push(geo);
-        const mesh = new THREE.Mesh(geo, mats[n.tier]);
-        mesh.position.set(n.x, 0, n.z);
-        mesh.name = n.id;
-        const ud: PickableUserData = { type: 'nest', id: n.id };
-        mesh.userData = ud;
-        this.groupNests.add(mesh);
-      }
+    // --- Nests: M9 silhouettes per tier.
+    for (const n of this.map.nests) {
+      const nestMesh = createNestMesh(n.tier);
+      nestMesh.position.set(n.x, 0, n.z);
+      nestMesh.name = n.id;
+      (nestMesh.userData as PickableUserData) = { type: 'nest', id: n.id };
+      tagChildren(nestMesh, 'nest', n.id);
+      this.groupNests.add(nestMesh);
     }
 
-    // --- Obstacles: grey boxes.
-    {
-      const mat = new THREE.MeshLambertMaterial({ color: 0x7a8088 });
-      this.disposables.push(mat);
-      for (let i = 0; i < this.map.obstacles.length; i++) {
-        const r = this.map.obstacles[i]!;
-        const w = r.maxX - r.minX;
-        const h = r.maxZ - r.minZ;
-        const geo = new THREE.BoxGeometry(w, 60, h);
-        this.disposables.push(geo);
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.set((r.minX + r.maxX) * 0.5, 30, (r.minZ + r.maxZ) * 0.5);
-        mesh.name = `obstacle-${i}`;
-        const ud: PickableUserData = { type: 'obstacle', id: `obstacle-${i}` };
-        mesh.userData = ud;
-        this.groupObstacles.add(mesh);
-      }
+    // --- Obstacles: alternating stone / tree silhouettes, centered in rect.
+    for (let i = 0; i < this.map.obstacles.length; i++) {
+      const r = this.map.obstacles[i]!;
+      const w = r.maxX - r.minX;
+      const h = r.maxZ - r.minZ;
+      const cx = (r.minX + r.maxX) * 0.5;
+      const cz = (r.minZ + r.maxZ) * 0.5;
+      const id = `obstacle-${i}`;
+      const kind: 'stone' | 'tree' = (i % 2 === 0) ? 'stone' : 'tree';
+      // Scale the silhouette to roughly fill the rect; base silhouettes are ~120u wide.
+      const baseSize = kind === 'stone' ? 120 : 80;
+      const scale = Math.max(0.6, Math.min(w, h) / baseSize);
+      const obsMesh = createObstacleMesh(kind, scale);
+      obsMesh.position.set(cx, 0, cz);
+      obsMesh.name = id;
+      (obsMesh.userData as PickableUserData) = { type: 'obstacle', id };
+      tagChildren(obsMesh, 'obstacle', id);
+      this.groupObstacles.add(obsMesh);
     }
   }
 
@@ -159,4 +160,14 @@ export class World {
       group.remove(child);
     }
   }
+}
+
+/** Stamp userData onto every descendant mesh so raycaster picks on leaves too. */
+function tagChildren(root: THREE.Object3D, type: PickableType, id: string): void {
+  root.traverse((obj) => {
+    if (obj === root) return;
+    const existing = obj.userData as Partial<PickableUserData>;
+    if (existing && typeof existing.type === 'string' && existing.type.length > 0) return;
+    obj.userData = { type, id };
+  });
 }
