@@ -10,12 +10,14 @@ import { createGround, createMapGrid } from '../world/Ground.ts';
 import { World } from '../world/World.ts';
 import { farthestNest, generateMap } from '../world/MapGenerator.ts';
 import { Pathfinder } from '../world/Pathfinder.ts';
-import { randomSeed } from '../util/Random.ts';
+import { createRng, randomSeed, type Rng } from '../util/Random.ts';
+import { PerkPicker } from '../ui/PerkPicker.ts';
 
 export interface HudBinding {
   fps: HTMLElement;
   camera: HTMLElement;
   seed: HTMLElement;
+  perks: HTMLElement;
 }
 
 export class Game {
@@ -32,6 +34,12 @@ export class Game {
   private readonly state: GameState;
   private readonly world: World;
   private readonly pathfinder: Pathfinder;
+
+  private readonly perkPicker: PerkPicker;
+  // Perk RNG derived from the world seed so the sequence is reproducible.
+  // M8 will replace the `K` demo hotkey with a real on-nest-destroyed trigger.
+  private readonly perkRng: Rng;
+  private perkPicking = false;
 
   private rafId = 0;
   private running = false;
@@ -70,11 +78,17 @@ export class Game {
     this.scene.add(this.world.root);
     this.pathfinder = new Pathfinder(this.world.navGrid);
 
+    // Offset perk RNG stream from world gen so generation isn't affected.
+    this.perkRng = createRng((useSeed ^ 0xbeefcafe) >>> 0);
+
     // --- Camera ---
     const aspect = host.clientWidth / host.clientHeight;
     this.cam = new StrategicCamera(aspect);
     this.cam.panTo(map.capital.x, map.capital.z);
     this.input = new CameraInput(this.canvas, this.cam);
+
+    // --- Perk picker (M7). Real trigger lands in M8 on-nest-destroyed. ---
+    this.perkPicker = new PerkPicker();
 
     // --- Picking: track pointerdown→pointerup to ignore drags. ---
     this.onPointerDownPick = (e: PointerEvent) => {
@@ -101,30 +115,42 @@ export class Game {
     this.canvas.addEventListener('pointerdown', this.onPointerDownPick);
     this.canvas.addEventListener('pointerup', this.onPointerUpPick);
 
-    // --- Debug hotkey P: toggle A* visualisation capital → farthest nest. ---
+    // --- Debug hotkeys ---
+    //   P = toggle A* visualisation capital → farthest nest.
+    //   K = M7 demo: pause sim, offer 3 perks, apply chosen. M8 replaces this
+    //       with the real "on nest destroyed" event.
     this.onKeyDownDebug = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'p') return;
-      this.toggleDebugPath();
+      const k = e.key.toLowerCase();
+      if (k === 'p') {
+        this.toggleDebugPath();
+        return;
+      }
+      if (k === 'k') {
+        void this.triggerPerkPick();
+        return;
+      }
     };
     window.addEventListener('keydown', this.onKeyDownDebug);
 
     window.addEventListener('resize', this.onResize);
 
-    // HUD seed chip.
+    // HUD chips.
     this.hud.seed.textContent = String(this.state.seed);
+    this.refreshPerkHud();
   }
 
   start(): void {
     if (this.running) return;
     this.running = true;
     this.clock.reset();
-    const frame = () => {
-      if (!this.running) return;
-      this.rafId = requestAnimationFrame(frame);
-      this.step();
-    };
-    this.rafId = requestAnimationFrame(frame);
+    this.scheduleFrame();
   }
+
+  private scheduleFrame = (): void => {
+    if (!this.running) return;
+    this.rafId = requestAnimationFrame(this.scheduleFrame);
+    this.step();
+  };
 
   stop(): void {
     this.running = false;
@@ -139,6 +165,7 @@ export class Game {
     this.canvas.removeEventListener('pointerup', this.onPointerUpPick);
     this.input.dispose();
     this.world.dispose();
+    this.perkPicker.dispose();
     this.disposeRenderer();
   }
 
@@ -167,6 +194,42 @@ export class Game {
     }
     const t = this.cam.target;
     this.hud.camera.textContent = `${t.x.toFixed(0)}, ${t.z.toFixed(0)}`;
+  }
+
+  private refreshPerkHud(): void {
+    const pm = this.state.perks;
+    this.hud.perks.textContent = `${pm.chosen.length}/${pm.maxPerks}`;
+  }
+
+  /**
+   * Demo flow: pause the game loop, show picker, apply chosen perk.
+   * Reentry-guarded via `perkPicking`. M8 replaces the `K` hotkey entry
+   * point with a real on-nest-destroyed trigger but keeps this same flow.
+   */
+  private async triggerPerkPick(): Promise<void> {
+    if (this.perkPicking) return;
+    const perks = this.state.perks;
+    if (!perks.canOffer()) return;
+
+    this.perkPicking = true;
+    const wasRunning = this.running;
+    // Pause the main loop while modal is shown.
+    this.running = false;
+
+    try {
+      const offer = perks.offer(this.perkRng);
+      const picked = await this.perkPicker.show(offer);
+      perks.choose(picked.id);
+      this.refreshPerkHud();
+    } finally {
+      this.perkPicking = false;
+      if (wasRunning) {
+        // Reset clock so the pause doesn't produce a huge dt spike.
+        this.clock.reset();
+        this.running = true;
+        this.rafId = requestAnimationFrame(this.scheduleFrame);
+      }
+    }
   }
 
   private toggleDebugPath(): void {
