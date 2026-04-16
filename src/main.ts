@@ -5,16 +5,17 @@ const fpsEl = document.getElementById('hud-fps');
 const camEl = document.getElementById('hud-camera');
 const seedEl = document.getElementById('hud-seed');
 const goldEl = document.getElementById('hud-gold');
+const perksEl = document.getElementById('hud-perks');
 const uiRoot = document.getElementById('ui-root');
 
-if (!host || !fpsEl || !camEl || !seedEl || !goldEl || !uiRoot) {
+if (!host || !fpsEl || !camEl || !seedEl || !goldEl || !perksEl || !uiRoot) {
   throw new Error(
-    'Missing required DOM nodes: #app, #hud-fps, #hud-camera, #hud-seed, #hud-gold, #ui-root',
+    'Missing required DOM nodes: #app, #hud-fps, #hud-camera, #hud-seed, #hud-gold, #hud-perks, #ui-root',
   );
 }
 
 const game = new Game(host, {
-  hud: { fps: fpsEl, camera: camEl, seed: seedEl, gold: goldEl },
+  hud: { fps: fpsEl, camera: camEl, seed: seedEl, gold: goldEl, perks: perksEl },
   uiRoot,
 });
 game.start();

@@ -10,9 +10,10 @@ import { createGround, createMapGrid } from '../world/Ground.ts';
 import { World } from '../world/World.ts';
 import { farthestNest, generateMap } from '../world/MapGenerator.ts';
 import { Pathfinder } from '../world/Pathfinder.ts';
-import { randomSeed } from '../util/Random.ts';
+import { createRng, randomSeed, type Rng } from '../util/Random.ts';
 import { HUD } from '../ui/HUD.ts';
 import { BuildMenu } from '../ui/BuildMenu.ts';
+import { PerkPicker } from '../ui/PerkPicker.ts';
 import { ECONOMY } from '../config/Tuning.ts';
 import type { Building, BuildingKind } from '../entities/Building.ts';
 import { Barracks } from '../entities/Barracks.ts';
@@ -25,6 +26,7 @@ export interface HudBinding {
   camera: HTMLElement;
   seed: HTMLElement;
   gold: HTMLElement;
+  perks: HTMLElement;
 }
 
 export interface GameBindings {
@@ -56,12 +58,15 @@ export class Game {
   private readonly hudView: HUD;
   private readonly buildMenu: BuildMenu;
   private pendingKind: BuildingKind | null = null;
-  /** Cached defaults for slot meshes so we can restore after highlight. */
   private readonly slotDefaults = new WeakMap<
     THREE.Mesh,
     { scaleX: number; scaleZ: number; opacity: number }
   >();
   private buildingIdCounter = 0;
+
+  private readonly perkPicker: PerkPicker;
+  private readonly perkRng: Rng;
+  private perkPicking = false;
 
   private rafId = 0;
   private running = false;
@@ -92,7 +97,6 @@ export class Game {
     this.scene.add(createGround());
     this.scene.add(createMapGrid());
 
-    // --- World ---
     const useSeed = seed ?? randomSeed();
     const map = generateMap(useSeed);
     this.state = new GameState(useSeed, map);
@@ -100,19 +104,19 @@ export class Game {
     this.scene.add(this.world.root);
     this.pathfinder = new Pathfinder(this.world.navGrid);
 
-    // --- UI ---
     this.hudView = new HUD(this.hud.gold);
     this.buildMenu = new BuildMenu(bindings.uiRoot);
     this.buildMenu.onSelect = (kind) => this.beginPlacement(kind);
     this.buildMenu.onCancel = () => this.cancelPlacement();
 
-    // --- Camera ---
+    this.perkRng = createRng((useSeed ^ 0xbeefcafe) >>> 0);
+    this.perkPicker = new PerkPicker();
+
     const aspect = host.clientWidth / host.clientHeight;
     this.cam = new StrategicCamera(aspect);
     this.cam.panTo(map.capital.x, map.capital.z);
     this.input = new CameraInput(this.canvas, this.cam);
 
-    // --- Picking: track pointerdown→pointerup to ignore drags. ---
     this.onPointerDownPick = (e: PointerEvent) => {
       if (e.button !== 0) return;
       this.pointerDownX = e.clientX;
@@ -124,7 +128,7 @@ export class Game {
       this.pointerDownButton = -1;
       const dx = e.clientX - this.pointerDownX;
       const dy = e.clientY - this.pointerDownY;
-      if (dx * dx + dy * dy > 4 * 4) return; // drag → ignore
+      if (dx * dx + dy * dy > 4 * 4) return;
       const hit = pickAt(e.clientX, e.clientY, this.canvas, this.cam.camera, this.world.root);
       if (this.pendingKind !== null) {
         this.handleBuildPick(hit);
@@ -141,30 +145,37 @@ export class Game {
     this.canvas.addEventListener('pointerdown', this.onPointerDownPick);
     this.canvas.addEventListener('pointerup', this.onPointerUpPick);
 
-    // --- Debug hotkey P: toggle A* visualisation capital → farthest nest. ---
     this.onKeyDownDebug = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'p') return;
-      this.toggleDebugPath();
+      const k = e.key.toLowerCase();
+      if (k === 'p') {
+        this.toggleDebugPath();
+        return;
+      }
+      if (k === 'k') {
+        void this.triggerPerkPick();
+        return;
+      }
     };
     window.addEventListener('keydown', this.onKeyDownDebug);
 
     window.addEventListener('resize', this.onResize);
 
-    // HUD seed chip.
     this.hud.seed.textContent = String(this.state.seed);
+    this.refreshPerkHud();
   }
 
   start(): void {
     if (this.running) return;
     this.running = true;
     this.clock.reset();
-    const frame = () => {
-      if (!this.running) return;
-      this.rafId = requestAnimationFrame(frame);
-      this.step();
-    };
-    this.rafId = requestAnimationFrame(frame);
+    this.scheduleFrame();
   }
+
+  private scheduleFrame = (): void => {
+    if (!this.running) return;
+    this.rafId = requestAnimationFrame(this.scheduleFrame);
+    this.step();
+  };
 
   stop(): void {
     this.running = false;
@@ -181,6 +192,7 @@ export class Game {
     this.buildMenu.dispose();
     for (const b of this.state.buildings) b.dispose();
     this.world.dispose();
+    this.perkPicker.dispose();
     this.disposeRenderer();
   }
 
@@ -213,9 +225,7 @@ export class Game {
     this.hud.camera.textContent = `${t.x.toFixed(0)}, ${t.z.toFixed(0)}`;
   }
 
-  // ---------------------------------------------------------------------------
-  // Placement flow (M3)
-  // ---------------------------------------------------------------------------
+  // ---------- Placement flow (M3) ----------
 
   private beginPlacement(kind: BuildingKind): void {
     if (this.state.treasury.gold < BUILDING_COSTS[kind]) return;
@@ -229,9 +239,7 @@ export class Game {
     this.highlightFreeSlots(false);
   }
 
-  private handleBuildPick(
-    hit: ReturnType<typeof pickAt>,
-  ): void {
+  private handleBuildPick(hit: ReturnType<typeof pickAt>): void {
     if (!hit || hit.type !== 'slot' || this.pendingKind === null) return;
     const kind = this.pendingKind;
     const slot = this.state.slots.find((s) => s.id === hit.id);
@@ -289,9 +297,6 @@ export class Game {
       if (active) {
         mesh.scale.x = defaults.scaleX * 1.3;
         mesh.scale.z = defaults.scaleZ * 1.3;
-        // Clone the material so scaling opacity on one slot doesn't bleed
-        // across the shared base material. Mark the clone so we dispose only
-        // highlights, not the shared original.
         if (!(mesh.material as { __m3HighlightClone?: boolean }).__m3HighlightClone) {
           const cloned = (mesh.material as THREE.MeshBasicMaterial).clone();
           (cloned as { __m3HighlightClone?: boolean }).__m3HighlightClone = true;
@@ -322,7 +327,38 @@ export class Game {
     }
   }
 
-  // ---------------------------------------------------------------------------
+  // ---------- Perks (M7) ----------
+
+  private refreshPerkHud(): void {
+    const pm = this.state.perks;
+    this.hud.perks.textContent = `${pm.chosen.length}/${pm.maxPerks}`;
+  }
+
+  private async triggerPerkPick(): Promise<void> {
+    if (this.perkPicking) return;
+    const perks = this.state.perks;
+    if (!perks.canOffer()) return;
+
+    this.perkPicking = true;
+    const wasRunning = this.running;
+    this.running = false;
+
+    try {
+      const offer = perks.offer(this.perkRng);
+      const picked = await this.perkPicker.show(offer);
+      perks.choose(picked.id);
+      this.refreshPerkHud();
+    } finally {
+      this.perkPicking = false;
+      if (wasRunning) {
+        this.clock.reset();
+        this.running = true;
+        this.rafId = requestAnimationFrame(this.scheduleFrame);
+      }
+    }
+  }
+
+  // ---------- Debug A* path ----------
 
   private toggleDebugPath(): void {
     if (this.debugPathNode) {
