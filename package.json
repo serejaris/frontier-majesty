@@ -1,0 +1,21 @@
+{
+  "name": "frontier-majesty",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Frontier Majesty — browser indirect-strategy MVP (Three.js + TypeScript)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "^0.171.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.171.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}

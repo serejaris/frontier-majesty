@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Frontier Majesty</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --hud-bg: rgba(10, 14, 20, 0.82);
+        --hud-fg: #e6efff;
+        --hud-accent: #ffcc66;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #0b0f14;
+        color: var(--hud-fg);
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          sans-serif;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      #app canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      #hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        display: flex;
+        gap: 10px;
+        padding: 8px 12px;
+        background: var(--hud-bg);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        font-variant-numeric: tabular-nums;
+        font-size: 13px;
+        letter-spacing: 0.3px;
+        user-select: none;
+        pointer-events: none;
+      }
+      #hud .chip {
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+      }
+      #hud .chip .label {
+        opacity: 0.6;
+      }
+      #hud .chip .value {
+        color: var(--hud-accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="hud">
+      <span class="chip"><span class="label">fps</span><span class="value" id="hud-fps">—</span></span>
+      <span class="chip"><span class="label">camera</span><span class="value" id="hud-camera">—</span></span>
+      <span class="chip"><span class="label">pan</span><span class="value">WASD · drag MMB · edge</span></span>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
