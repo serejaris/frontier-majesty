@@ -42,6 +42,7 @@ export interface HudBinding {
   seed: HTMLElement;
   gold: HTMLElement;
   perks: HTMLElement;
+  time: HTMLElement;
 }
 
 export interface GameBindings {
@@ -199,7 +200,14 @@ export class Game {
     this.ui = {
       heroCard: new HeroCard(),
       endScreen: new EndScreen(() => {
+        // Simple restart: dispose current Game and reload the page.
+        // main.ts may override this via an explicit callback if finer control
+        // is needed; for MVP reload is the cleanest path back to a fresh seed.
         this.ui.endScreen.hide();
+        this.dispose();
+        if (typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+          window.location.reload();
+        }
       }),
     };
 
@@ -356,6 +364,28 @@ export class Game {
     this.buildMenu.setGold(this.state.treasury.gold);
     this.recruitPanel.refresh();
     this.updateHud(frameDt);
+
+    // M6 real perk trigger — fire the queued pick between frames so we can
+    // safely pause the sim + open the modal.
+    if (this.state.pendingPerkPick && !this.perkPicking) {
+      this.state.pendingPerkPick = false;
+      void this.triggerPerkPick();
+    }
+  }
+
+  private reportEnd(outcome: 'victory' | 'defeat'): void {
+    if (this.state.endReported) return;
+    this.state.endReported = true;
+    // Pause the sim — RAF loop stops, UI input still responds via event listeners.
+    this.running = false;
+    this.ui.endScreen.show({
+      outcome,
+      seed: this.state.seed,
+      durationSec: this.state.simT,
+      perks: this.state.perks.chosen.map((p) => p.title),
+      heroesAlive: this.state.heroes.length,
+      nestsDestroyed: this.state.nestsDestroyed,
+    });
   }
 
   private update(dt: number): void {
@@ -408,6 +438,15 @@ export class Game {
 
     // Capital weak defense aura tick.
     this.state.capital.tickAura(dt, this.state.monsters, this.state.simT);
+
+    // End-game triggers — both paths route through the shared end-screen handler.
+    if (!this.state.endReported) {
+      if (this.state.capital.hp <= 0) {
+        this.reportEnd('defeat');
+      } else if (this.state.nests.length === 0) {
+        this.reportEnd('victory');
+      }
+    }
   }
 
   private updateHud(frameDt: number): void {
@@ -422,6 +461,7 @@ export class Game {
     }
     const t = this.cam.target;
     this.hud.camera.textContent = `${t.x.toFixed(0)}, ${t.z.toFixed(0)}`;
+    this.hud.time.textContent = formatTime(this.state.simT);
   }
 
   // ---------- Placement flow (M3) ----------
@@ -611,8 +651,12 @@ export class Game {
     this.statusIcons.ensure(hero.id, () => {
       if (!hero.alive) return null;
       const state = hero.aiState;
-      // Rally + patrol read as quiet states — keep them unobtrusive (no glyph).
-      if (state === 'patrol') {
+      // Quiet states show POT if the hero is carrying a potion (secondary
+      // indicator), else no glyph. Active states take priority over POT.
+      if (state === 'patrol' || state === 'spawn-rally') {
+        if (hero.potionCount > 0 && !hero.inCombat) {
+          return { worldX: hero.position.x, worldZ: hero.position.z, glyph: 'POT' };
+        }
         return { worldX: hero.position.x, worldZ: hero.position.z, glyph: null };
       }
       const glyph = STATE_GLYPH[state] ?? null;
@@ -676,6 +720,16 @@ export class Game {
     const parent = nest.mesh.parent ?? this.world.root;
     parent.remove(nest.mesh);
     this.healthBars.remove(nest.id);
+
+    // M6 real perk trigger: queue an offer if more nests remain and the perk
+    // cap isn't reached. Deferred to next frame so the picker doesn't open
+    // inside a fixed-step tick (pause flow needs the RAF loop).
+    //
+    // Counting: CombatSystem removes the dead nest from `state.nests` AFTER
+    // this callback returns, so "this was the last nest" is length === 1 here.
+    if (this.state.nests.length >= 2 && this.state.perks.canOffer()) {
+      this.state.pendingPerkPick = true;
+    }
   }
 
   private showHeroCard(hero: Hero): void {
@@ -711,13 +765,30 @@ export class Game {
     this.running = false;
 
     try {
+      // Snapshot Triumph heal fraction before choose() applies the newly-picked
+      // perk — so if Triumph is the pick we compare (after - before) to detect it.
+      const healBefore = this.state.perkMods.onNestDestroyHealPercent;
+
       const offer = perks.offer(this.perkRng);
       const picked = await this.perkPicker.show(offer);
       perks.choose(picked.id);
       this.refreshPerkHud();
+
+      // Triumph: if this pick raised the heal fraction, apply it immediately.
+      // The next nest-destroy also heals via CombatSystem so both paths work:
+      //   - Pick-time: covers the just-destroyed nest that triggered the pick.
+      //   - Destroy-time: covers subsequent nests destroyed while Triumph is active.
+      const healAfter = this.state.perkMods.onNestDestroyHealPercent;
+      const healDelta = Math.max(0, healAfter - healBefore);
+      if (healDelta > 0) {
+        for (const h of this.state.heroes) {
+          if (!h.alive) continue;
+          h.hp = Math.min(h.maxHp, h.hp + h.maxHp * healDelta);
+        }
+      }
     } finally {
       this.perkPicking = false;
-      if (wasRunning) {
+      if (wasRunning && !this.state.endReported) {
         this.clock.reset();
         this.running = true;
         this.rafId = requestAnimationFrame(this.scheduleFrame);
@@ -804,6 +875,13 @@ export class Game {
     this.renderer.setSize(this.host.clientWidth, this.host.clientHeight, false);
     this.cam.resize(this.host.clientWidth / this.host.clientHeight);
   };
+}
+
+function formatTime(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${mm}:${ss.toString().padStart(2, '0')}`;
 }
 
 function ensureWorldOverlay(): HTMLElement {

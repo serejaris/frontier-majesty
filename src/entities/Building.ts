@@ -42,3 +42,16 @@ export abstract class Building {
     });
   }
 }
+
+/**
+ * Stamp `userData = { type: 'building', id }` onto every descendant of a
+ * building's root group. Required so raycasts against leaf meshes in a
+ * compound silhouette still resolve back to the building id.
+ */
+export function tagChildrenAsBuilding(root: THREE.Object3D, id: string): void {
+  root.traverse((obj) => {
+    const existing = obj.userData as { type?: string; id?: string };
+    if (existing && existing.type === 'building' && existing.id === id) return;
+    obj.userData = { type: 'building', id };
+  });
+}

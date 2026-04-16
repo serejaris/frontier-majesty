@@ -188,6 +188,76 @@ export const NESTS: Record<'near' | 'mid' | 'far', NestTierTuning> = {
   far: { hp: 700, spawnIntervalSec: 16, maxActiveDefenders: 6 },
 };
 
+/**
+ * Equipment tier table per PRD §14.3.
+ *
+ * Kept data-driven so `Hero` getters just look up — avoids hand-rolled
+ * per-tier branches and makes future tuning a single-table edit.
+ *
+ * Tier multipliers are **incremental** at the row level. Effective values
+ * are the product of all rows with tier ≤ hero.weaponTier / armorTier.
+ *
+ *  - weapon rows (kind='weapon'):
+ *      dmgMult — multiplicative damage bump this tier contributes
+ *      rateMult — warrior secondary (T2 +10% attack rate)
+ *      rangeMult — archer secondary (T2 +20% attack range)
+ *      nestDmgMult — warrior signature (T3 +25% vs nests)
+ *      critAddPct — archer signature (T3 +10% crit chance)
+ *  - armor rows (kind='armor'):
+ *      hpMult — multiplicative max HP bump
+ *      drAdd — additive fractional damage reduction
+ *
+ * Prices match PRD §14.3 gold costs.
+ */
+export interface EquipmentRow {
+  readonly kind: 'weapon' | 'armor';
+  readonly tier: 1 | 2 | 3;
+  readonly price: number;
+  /** Damage multiplier (weapon). 1 for non-weapon rows. */
+  readonly dmgMult: number;
+  /** Warrior attack-rate multiplier (weapon T2/T3). 1 = no change. */
+  readonly warriorRateMult: number;
+  /** Archer attack-range multiplier (weapon T2). 1 = no change. */
+  readonly archerRangeMult: number;
+  /** Warrior +% damage vs nests signature (weapon T3). 0 = none. */
+  readonly warriorNestDmgAdd: number;
+  /** Archer +% crit chance signature (weapon T3). 0 = none. */
+  readonly archerCritAdd: number;
+  /** Max HP multiplier (armor). 1 = no change. */
+  readonly hpMult: number;
+  /** Additive damage reduction (armor). 0..1. */
+  readonly drAdd: number;
+}
+
+export const EQUIPMENT: readonly EquipmentRow[] = [
+  // Weapons
+  { kind: 'weapon', tier: 1, price: 40,
+    dmgMult: 1.15, warriorRateMult: 1, archerRangeMult: 1,
+    warriorNestDmgAdd: 0, archerCritAdd: 0, hpMult: 1, drAdd: 0 },
+  { kind: 'weapon', tier: 2, price: 90,
+    dmgMult: 1.15, warriorRateMult: 1.10, archerRangeMult: 1.20,
+    warriorNestDmgAdd: 0, archerCritAdd: 0, hpMult: 1, drAdd: 0 },
+  { kind: 'weapon', tier: 3, price: 160,
+    dmgMult: 1.20, warriorRateMult: 1, archerRangeMult: 1,
+    warriorNestDmgAdd: 0.25, archerCritAdd: 0.10, hpMult: 1, drAdd: 0 },
+  // Armor
+  { kind: 'armor', tier: 1, price: 35,
+    dmgMult: 1, warriorRateMult: 1, archerRangeMult: 1,
+    warriorNestDmgAdd: 0, archerCritAdd: 0, hpMult: 1.15, drAdd: 0 },
+  { kind: 'armor', tier: 2, price: 75,
+    dmgMult: 1, warriorRateMult: 1, archerRangeMult: 1,
+    warriorNestDmgAdd: 0, archerCritAdd: 0, hpMult: 1.10, drAdd: 0.10 },
+  { kind: 'armor', tier: 3, price: 130,
+    dmgMult: 1, warriorRateMult: 1, archerRangeMult: 1,
+    warriorNestDmgAdd: 0, archerCritAdd: 0, hpMult: 1.15, drAdd: 0.15 },
+];
+
+/** Lookup the incremental row for a given slot + tier. Returns null for tier 0. */
+export function equipmentRow(kind: 'weapon' | 'armor', tier: 0 | 1 | 2 | 3): EquipmentRow | null {
+  if (tier === 0) return null;
+  return EQUIPMENT.find((r) => r.kind === kind && r.tier === tier) ?? null;
+}
+
 /** Combat rules — reward splits + damage attribution. */
 export const COMBAT = {
   /** XP reward for killing a single monster (split across attackers). PRD §13.2. */

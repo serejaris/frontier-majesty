@@ -6,7 +6,7 @@ import type { NavGrid } from '../world/NavGrid.ts';
 import type { Pathfinder } from '../world/Pathfinder.ts';
 import type { Building } from '../entities/Building.ts';
 import type { Capital } from '../entities/Capital.ts';
-import { HEROES, ECONOMY } from '../config/Tuning.ts';
+import { HEROES, ECONOMY, equipmentRow } from '../config/Tuning.ts';
 import { distance2d } from '../util/Math.ts';
 import { assign } from './NestAssignment.ts';
 import { actSpawnRally } from './states/spawnRally.ts';
@@ -456,9 +456,6 @@ export interface SmithStep {
   price: number;
 }
 
-const WEAPON_PRICES: Record<1 | 2 | 3, number> = { 1: 40, 2: 90, 3: 160 };
-const ARMOR_PRICES: Record<1 | 2 | 3, number> = { 1: 35, 2: 75, 3: 130 };
-
 const WARRIOR_QUEUE: ReadonlyArray<{ kind: 'weapon' | 'armor'; tier: 1 | 2 | 3 }> = [
   { kind: 'weapon', tier: 1 },
   { kind: 'armor', tier: 1 },
@@ -477,13 +474,14 @@ const ARCHER_QUEUE: ReadonlyArray<{ kind: 'weapon' | 'armor'; tier: 1 | 2 | 3 }>
   { kind: 'armor', tier: 3 },
 ];
 
-/** Next purchase step for the hero, or null if fully equipped. */
+/** Next purchase step for the hero, or null if fully equipped. Prices come from EQUIPMENT. */
 export function nextSmithUpgrade(hero: Hero): SmithStep | null {
   const queue = hero.kind === 'warrior' ? WARRIOR_QUEUE : ARCHER_QUEUE;
   for (const step of queue) {
     const have = step.kind === 'weapon' ? hero.weaponTier : hero.armorTier;
     if (have < step.tier) {
-      const price = step.kind === 'weapon' ? WEAPON_PRICES[step.tier] : ARMOR_PRICES[step.tier];
+      const row = equipmentRow(step.kind, step.tier);
+      const price = row ? row.price : 0;
       return { kind: step.kind, tier: step.tier, price };
     }
   }

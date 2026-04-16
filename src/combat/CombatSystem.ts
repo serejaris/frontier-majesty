@@ -5,6 +5,7 @@ import type { HitFlash } from '../rendering/HitFlash.ts';
 import type { PerkMods } from '../progression/Perks.ts';
 import { COMBAT, ECONOMY, HEROES } from '../config/Tuning.ts';
 import { distance2d } from '../util/Math.ts';
+import { createRng } from '../util/Random.ts';
 import type { AttackContext } from '../progression/Abilities.ts';
 
 /** Events surfaced to `Game` so it can remove meshes, toggle perks, etc. */
@@ -48,6 +49,23 @@ interface PendingVolley {
  *  - applies the Battle Rhythm (perk) attack-speed buff on monster kill.
  */
 export class CombatSystem {
+  /**
+   * Per-hero deterministic RNG for tier crit rolls (Archer weapon T3 signature).
+   * Keyed by hero id so each hero has a stable stream across ticks.
+   */
+  private readonly critRngs = new Map<string, ReturnType<typeof createRng>>();
+
+  private critRng(heroId: string): ReturnType<typeof createRng> {
+    let r = this.critRngs.get(heroId);
+    if (!r) {
+      let h = 2166136261;
+      for (let i = 0; i < heroId.length; i++) h = Math.imul(h ^ heroId.charCodeAt(i), 16777619);
+      r = createRng((h ^ 0xc1a17) >>> 0);
+      this.critRngs.set(heroId, r);
+    }
+    return r;
+  }
+
   tick(world: CombatWorld, events: CombatEvents): void {
     // --- 1. Hero attacks (targeting now lives in HeroAI).
     for (const hero of world.heroes) {
@@ -67,7 +85,7 @@ export class CombatSystem {
 
       const period = 1 / Math.max(0.01, hero.attackRate);
       if (world.simT - hero.lastAttackT < period) continue;
-      applyHeroAttack(hero, tgt, world);
+      this.applyHeroAttack(hero, tgt, world);
       flashTarget(tgt, world.hitFlash);
 
       // After-attack abilities may have stashed cleave / volley requests.
@@ -117,32 +135,50 @@ export class CombatSystem {
       world.heroes.splice(i, 1);
     }
   }
+
+  private applyHeroAttack(hero: Hero, tgt: HeroTarget, world: CombatWorld): void {
+    const mods = world.perkMods;
+    const ctx: AttackContext = { damage: hero.baseDamage, crit: false };
+    // Pre-attack ability hooks (Champion, Marksman, Focus Shot, ...).
+    for (const ab of hero.abilities) ab.onBeforeAttack?.(hero, tgt, ctx, world.simT);
+
+    // Archer weapon T3 signature: +10% crit chance (rolled after ability crits).
+    if (hero.kind === 'archer' && !ctx.crit) {
+      const critAdd = hero.weaponCritChanceBonus;
+      if (critAdd > 0) {
+        const rng = this.critRng(hero.id);
+        if (rng.chance(critAdd)) {
+          ctx.damage *= 2;
+          ctx.crit = true;
+        }
+      }
+    }
+
+    // Warrior weapon T3 signature: +25% vs nests (additive with Champion L8 +25%).
+    if (hero.kind === 'warrior' && tgt.type === 'nest') {
+      const nestBonus = hero.weaponNestDamageBonus;
+      if (nestBonus > 0) ctx.damage *= 1 + nestBonus;
+    }
+
+    if (tgt.type === 'nest') ctx.damage *= mods.nestDamageMultiplier;
+    // Archer Deadeye perk: bonus vs <50% HP targets.
+    if (hero.kind === 'archer' && mods.archerLowHpDamageBonus > 0 && tgt.hp / Math.max(1, tgt.maxHp) < 0.5) {
+      ctx.damage *= 1 + mods.archerLowHpDamageBonus;
+    }
+    // Shield Wall perk: warrior-adjacency damage reduction is incoming-side; skip here.
+
+    hero.lastAttackT = world.simT;
+    hero.inCombat = true;
+    hero.combatCooldown = 0;
+    hero.lastInCombatT = world.simT;
+    tgt.applyDamage(ctx.damage, hero.id, world.simT);
+
+    // Post-attack ability hooks (Cleave, Volley counter increment, etc.).
+    for (const ab of hero.abilities) ab.onAfterAttack?.(hero, tgt, ctx, world.simT);
+  }
 }
 
 // ---------------- helpers ----------------
-
-function applyHeroAttack(hero: Hero, tgt: HeroTarget, world: CombatWorld): void {
-  const mods = world.perkMods;
-  const ctx: AttackContext = { damage: hero.baseDamage, crit: false };
-  // Pre-attack ability hooks (Champion, Marksman, Focus Shot, ...).
-  for (const ab of hero.abilities) ab.onBeforeAttack?.(hero, tgt, ctx, world.simT);
-
-  if (tgt.type === 'nest') ctx.damage *= mods.nestDamageMultiplier;
-  // Archer Deadeye perk: bonus vs <50% HP targets.
-  if (hero.kind === 'archer' && mods.archerLowHpDamageBonus > 0 && tgt.hp / Math.max(1, tgt.maxHp) < 0.5) {
-    ctx.damage *= 1 + mods.archerLowHpDamageBonus;
-  }
-  // Shield Wall perk: warrior-adjacency damage reduction is incoming-side; skip here.
-
-  hero.lastAttackT = world.simT;
-  hero.inCombat = true;
-  hero.combatCooldown = 0;
-  hero.lastInCombatT = world.simT;
-  tgt.applyDamage(ctx.damage, hero.id, world.simT);
-
-  // Post-attack ability hooks (Cleave, Volley counter increment, etc.).
-  for (const ab of hero.abilities) ab.onAfterAttack?.(hero, tgt, ctx, world.simT);
-}
 
 function processStashedAbilities(hero: Hero, world: CombatWorld): void {
   const stash = hero as unknown as { pendingCleaveDamage?: PendingCleave; pendingVolley?: PendingVolley };

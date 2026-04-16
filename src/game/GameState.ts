@@ -34,6 +34,10 @@ export class GameState {
   simT = 0;
   /** Total nests destroyed this run. */
   nestsDestroyed = 0;
+  /** Once set, the Game has reported victory/defeat. Gate end-screen so it fires once. */
+  endReported = false;
+  /** Set by combat → onNestDestroyed; Game.step consumes it to open the perk picker. */
+  pendingPerkPick = false;
   readonly perks: PerkManager;
   readonly perkMods: PerkMods;
   /** The Capital — loss condition + weak defense aura (PRD §7.1). */

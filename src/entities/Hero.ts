@@ -3,7 +3,7 @@ import type { NavGrid } from '../world/NavGrid.ts';
 import type { Pathfinder, PathPointWorld } from '../world/Pathfinder.ts';
 import type { GameState } from '../game/GameState.ts';
 import { createBlobShadow } from '../rendering/BlobShadows.ts';
-import { COMBAT, HEROES } from '../config/Tuning.ts';
+import { COMBAT, HEROES, equipmentRow } from '../config/Tuning.ts';
 import { distance2d } from '../util/Math.ts';
 import { levelForXp } from '../progression/Leveling.ts';
 import type { AbilityCallbacks, IncomingContext } from '../progression/Abilities.ts';
@@ -173,27 +173,35 @@ export abstract class Hero {
 
   /** Effective base damage applied per swing — class base × weapon tier × buffs. */
   get baseDamage(): number {
-    return this.classBaseDamage * weaponDamageMult(this.weaponTier);
+    let d = this.classBaseDamage;
+    for (let t = 1; t <= this.weaponTier; t++) {
+      const row = equipmentRow('weapon', t as 1 | 2 | 3);
+      if (row) d *= row.dmgMult;
+    }
+    return d;
   }
 
-  /** Effective attacks-per-second — class base × weapon T2 (warrior) × ability buffs. */
+  /** Effective attacks-per-second — class base × warrior T2 secondary × ability buffs. */
   get attackRate(): number {
     let rate = this.classBaseAttackRate;
-    if (this.kind === 'warrior' && this.weaponTier >= 2) {
-      // Warrior weapon T2 secondary: +12% attack speed; T3 stacks another +5%.
-      rate *= 1.12;
-      if (this.weaponTier >= 3) rate *= 1.05;
+    if (this.kind === 'warrior') {
+      for (let t = 1; t <= this.weaponTier; t++) {
+        const row = equipmentRow('weapon', t as 1 | 2 | 3);
+        if (row) rate *= row.warriorRateMult;
+      }
     }
     if (this.buffs.attackRateRemaining > 0) rate *= 1 + this.buffs.attackRatePct;
     return rate;
   }
 
-  /** Effective attack range — class base × archer T2/T3 range bonus. */
+  /** Effective attack range — class base × archer T2 range secondary. */
   get attackRange(): number {
     let r = this.classBaseAttackRange;
-    if (this.kind === 'archer' && this.weaponTier >= 2) {
-      r *= 1.10; // T2 secondary
-      if (this.weaponTier >= 3) r *= 1.08; // T3 signature pierce/range bump
+    if (this.kind === 'archer') {
+      for (let t = 1; t <= this.weaponTier; t++) {
+        const row = equipmentRow('weapon', t as 1 | 2 | 3);
+        if (row) r *= row.archerRangeMult;
+      }
     }
     return r;
   }
@@ -201,10 +209,34 @@ export abstract class Hero {
   /** Effective damage reduction (0..1) from armor tier + buff stacks. */
   get damageReduction(): number {
     let dr = 0;
-    if (this.armorTier >= 2) dr += 0.10;
-    if (this.armorTier >= 3) dr += 0.15;
+    for (let t = 1; t <= this.armorTier; t++) {
+      const row = equipmentRow('armor', t as 1 | 2 | 3);
+      if (row) dr += row.drAdd;
+    }
     if (this.damageReductionRemaining > 0) dr = Math.min(0.85, dr + this.damageReductionBuff);
     return dr;
+  }
+
+  /** Warrior T3 signature: additive +% damage vs nests. */
+  get weaponNestDamageBonus(): number {
+    if (this.kind !== 'warrior') return 0;
+    let bonus = 0;
+    for (let t = 1; t <= this.weaponTier; t++) {
+      const row = equipmentRow('weapon', t as 1 | 2 | 3);
+      if (row) bonus += row.warriorNestDmgAdd;
+    }
+    return bonus;
+  }
+
+  /** Archer T3 signature: additive +% crit chance (0..1). */
+  get weaponCritChanceBonus(): number {
+    if (this.kind !== 'archer') return 0;
+    let bonus = 0;
+    for (let t = 1; t <= this.weaponTier; t++) {
+      const row = equipmentRow('weapon', t as 1 | 2 | 3);
+      if (row) bonus += row.archerCritAdd;
+    }
+    return bonus;
   }
 
   /** Set the rally-until timestamp relative to the current simulation time. */
@@ -420,35 +452,13 @@ export function isLineOfSightClear(
   return true;
 }
 
-/**
- * PRD §14.3 weapon damage multipliers (cumulative).
- *  T1 = +15%  → ×1.15
- *  T2 = +15% on top → ×1.15 × 1.15 = ×1.3225
- *  T3 = +20% on top → ×1.5870
- */
-function weaponDamageMult(tier: EquipmentTier): number {
-  switch (tier) {
-    case 0:
-      return 1;
-    case 1:
-      return 1.15;
-    case 2:
-      return 1.15 * 1.15;
-    case 3:
-      return 1.15 * 1.15 * 1.20;
-  }
-}
-
-/** PRD §14.3 armor HP multiplier (cumulative). T1 +15%, T2 +10% more, T3 +15% more. */
+/** PRD §14.3 armor HP multiplier (cumulative). T1 +15%, T2 +10% more, T3 +15% more.
+ *  Data-driven: derives from the EQUIPMENT table so tuning edits in one place. */
 export function armorHpMult(tier: EquipmentTier): number {
-  switch (tier) {
-    case 0:
-      return 1;
-    case 1:
-      return 1.15;
-    case 2:
-      return 1.15 * 1.10;
-    case 3:
-      return 1.15 * 1.10 * 1.15;
+  let m = 1;
+  for (let t = 1; t <= tier; t++) {
+    const row = equipmentRow('armor', t as 1 | 2 | 3);
+    if (row) m *= row.hpMult;
   }
+  return m;
 }
