@@ -2,6 +2,7 @@ import type { Hero, HeroTarget } from '../entities/Hero.ts';
 import type { Monster } from '../entities/Monster.ts';
 import type { Nest } from '../entities/Nest.ts';
 import type { HitFlash } from '../rendering/HitFlash.ts';
+import type { Projectiles } from '../rendering/Projectiles.ts';
 import type { PerkMods } from '../progression/Perks.ts';
 import { COMBAT, ECONOMY, HEROES } from '../config/Tuning.ts';
 import { distance2d } from '../util/Math.ts';
@@ -23,6 +24,7 @@ export interface CombatWorld {
   nests: Nest[];
   perkMods: PerkMods;
   hitFlash: HitFlash;
+  projectiles: Projectiles;
 }
 
 interface PendingCleave {
@@ -87,6 +89,9 @@ export class CombatSystem {
       if (world.simT - hero.lastAttackT < period) continue;
       this.applyHeroAttack(hero, tgt, world);
       flashTarget(tgt, world.hitFlash);
+      if (hero.kind === 'archer') {
+        world.projectiles.spawn(hero.position, tgt.position, 1200);
+      }
 
       // After-attack abilities may have stashed cleave / volley requests.
       processStashedAbilities(hero, world);

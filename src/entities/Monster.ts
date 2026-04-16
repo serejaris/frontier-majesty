@@ -52,6 +52,7 @@ export class Monster implements HeroTarget {
   roamingTarget: { x: number; z: number } | null = null;
   lastAttackT = -Infinity;
   alive = true;
+  lastHpChangeT = -Infinity;
 
   /** Current wander destination (patrol) or pursuit destination (aggro). */
   private dest: MonsterPosition | null = null;
@@ -88,6 +89,7 @@ export class Monster implements HeroTarget {
   applyDamage(amount: number, sourceHeroId: string, nowT: number): void {
     if (!this.alive) return;
     this.hp = Math.max(0, this.hp - amount);
+    this.lastHpChangeT = nowT;
     const rec = this.attackers.get(sourceHeroId);
     if (rec) {
       rec.damage += amount;

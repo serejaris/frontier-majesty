@@ -34,18 +34,22 @@ export type HeroState =
   | 'shop-blacksmith'
   | 'return-to-front';
 
-/** ASCII glyphs surfaced through StatusIcons. */
-export const STATE_GLYPH: Record<HeroState, string> = {
-  'spawn-rally': 'RLY',
-  patrol: 'PAT',
-  engage: 'ATK',
-  'assist-ally': 'AST',
-  'assault-nest': 'ASS',
-  retreat: 'RET',
-  recover: 'RCV',
-  'shop-market': 'MKT',
-  'shop-blacksmith': 'BSM',
-  'return-to-front': 'RTF',
+/**
+ * ASCII glyphs surfaced through StatusIcons. Only "loud" states get a label —
+ * PRD §12 wants combat/retreat/shop visible; other states are implied by
+ * movement + HP bar. `null` hides the glyph (StatusIcons treats null as hidden).
+ */
+export const STATE_GLYPH: Record<HeroState, string | null> = {
+  'spawn-rally': null,
+  patrol: null,
+  engage: null,
+  'assist-ally': null,
+  'assault-nest': null,
+  retreat: 'FLEE',
+  recover: null,
+  'shop-market': 'BUY',
+  'shop-blacksmith': 'FORGE',
+  'return-to-front': null,
 };
 
 /** Snapshot the AI tick passes to state-act functions. */

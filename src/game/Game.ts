@@ -8,6 +8,7 @@ import { StrategicCamera } from '../rendering/Camera.ts';
 import { HealthBars } from '../rendering/HealthBars.ts';
 import { StatusIcons } from '../rendering/StatusIcons.ts';
 import { HitFlash } from '../rendering/HitFlash.ts';
+import { Projectiles } from '../rendering/Projectiles.ts';
 import { HeroCard } from '../ui/HeroCard.ts';
 import { EndScreen } from '../ui/EndScreen.ts';
 import { CameraInput } from '../input/CameraInput.ts';
@@ -101,6 +102,7 @@ export class Game {
   private readonly healthBars: HealthBars;
   private readonly statusIcons: StatusIcons;
   private readonly hitFlash: HitFlash;
+  private readonly projectiles: Projectiles;
   readonly ui: GameUi;
 
   private readonly combat = new CombatSystem();
@@ -197,6 +199,8 @@ export class Game {
     this.healthBars = new HealthBars(this.worldOverlay);
     this.statusIcons = new StatusIcons(this.worldOverlay);
     this.hitFlash = new HitFlash();
+    this.projectiles = new Projectiles();
+    this.scene.add(this.projectiles.root);
     this.ui = {
       heroCard: new HeroCard(),
       endScreen: new EndScreen(() => {
@@ -221,6 +225,8 @@ export class Game {
       hp: this.state.capital.hp,
       maxHp: this.state.capital.maxHp,
       visible: true,
+      lastChangeT: this.state.capital.lastHpChangeT,
+      nowT: this.state.simT,
     }) : null);
 
     this.onPointerDownPick = (e: PointerEvent) => {
@@ -338,6 +344,7 @@ export class Game {
     this.healthBars.dispose();
     this.statusIcons.dispose();
     this.hitFlash.dispose();
+    this.projectiles.dispose();
     this.ui.heroCard.dispose();
     this.ui.endScreen.dispose();
     this.disposeRenderer();
@@ -355,6 +362,7 @@ export class Game {
     this.input.update(frameDt);
 
     this.hitFlash.update(frameDt);
+    this.projectiles.update(frameDt);
     const vp = { w: this.host.clientWidth, h: this.host.clientHeight };
     this.healthBars.update(this.cam.camera, vp);
     this.statusIcons.update(this.cam.camera, vp);
@@ -418,6 +426,7 @@ export class Game {
         nests: this.state.nests,
         perkMods: this.state.perkMods,
         hitFlash: this.hitFlash,
+        projectiles: this.projectiles,
       },
       {
         onHeroDied: (hero) => this.onHeroDied(hero),
@@ -647,19 +656,12 @@ export class Game {
       hp: hero.hp,
       maxHp: hero.maxHp,
       visible: true,
+      lastChangeT: hero.lastHpChangeT,
+      nowT: this.state.simT,
     }) : null);
     this.statusIcons.ensure(hero.id, () => {
       if (!hero.alive) return null;
-      const state = hero.aiState;
-      // Quiet states show POT if the hero is carrying a potion (secondary
-      // indicator), else no glyph. Active states take priority over POT.
-      if (state === 'patrol' || state === 'spawn-rally') {
-        if (hero.potionCount > 0 && !hero.inCombat) {
-          return { worldX: hero.position.x, worldZ: hero.position.z, glyph: 'POT' };
-        }
-        return { worldX: hero.position.x, worldZ: hero.position.z, glyph: null };
-      }
-      const glyph = STATE_GLYPH[state] ?? null;
+      const glyph = STATE_GLYPH[hero.aiState];
       return { worldX: hero.position.x, worldZ: hero.position.z, glyph };
     });
   }
@@ -675,14 +677,9 @@ export class Game {
       hp: monster.hp,
       maxHp: monster.maxHp,
       visible: true,
+      lastChangeT: monster.lastHpChangeT,
+      nowT: this.state.simT,
     }) : null);
-    this.statusIcons.ensure(monster.id, () => {
-      if (!monster.alive) return null;
-      if (monster.state === 'aggro') {
-        return { worldX: monster.position.x, worldZ: monster.position.z, glyph: 'AGR' };
-      }
-      return { worldX: monster.position.x, worldZ: monster.position.z, glyph: null };
-    });
   }
 
   private registerNestOverlays(nest: Nest): void {
@@ -692,6 +689,8 @@ export class Game {
       hp: nest.hp,
       maxHp: nest.maxHp,
       visible: true,
+      lastChangeT: nest.lastHpChangeT,
+      nowT: this.state.simT,
     }) : null);
   }
 

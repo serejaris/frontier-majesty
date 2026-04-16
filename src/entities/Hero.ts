@@ -75,6 +75,7 @@ export abstract class Hero {
   combatCooldown = Infinity;
   /** Time of last in-combat event (sec). Used by 6s out-of-combat shop gate. */
   lastInCombatT = -Infinity;
+  lastHpChangeT = -Infinity;
   /** Tracks how long we've been continuously in combat — for the AI 6s gate logic. */
   aiCombatTimer = 0;
 
@@ -302,7 +303,10 @@ export abstract class Hero {
     const ctx: IncomingContext = { damage: dmg };
     for (const ab of this.abilities) ab.onIncomingDamage?.(this, ctx, this.simT);
     dmg = Math.max(0, ctx.damage);
-    this.hp = Math.max(0, this.hp - dmg);
+    if (dmg > 0) {
+      this.hp = Math.max(0, this.hp - dmg);
+      this.lastHpChangeT = this.simT;
+    }
     this.inCombat = true;
     this.combatCooldown = 0;
     this.lastInCombatT = this.simT;

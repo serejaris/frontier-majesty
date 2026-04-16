@@ -38,6 +38,7 @@ export class Nest implements HeroTarget {
   lastSpawnT: number;
 
   alive = true;
+  lastHpChangeT = -Infinity;
   private monsterCounter = 0;
   /** simT of the next roaming dispatch attempt. Lazily initialized on first tick. */
   private nextRoamerT = -1;
@@ -71,6 +72,7 @@ export class Nest implements HeroTarget {
   applyDamage(amount: number, sourceHeroId: string, nowT: number): void {
     if (!this.alive) return;
     this.hp = Math.max(0, this.hp - amount);
+    this.lastHpChangeT = nowT;
     const rec = this.attackers.get(sourceHeroId);
     if (rec) {
       rec.damage += amount;

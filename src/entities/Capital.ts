@@ -24,6 +24,7 @@ export class Capital implements HeroTarget {
   hp: number;
   maxHp: number;
   alive = true;
+  lastHpChangeT = -Infinity;
 
   /** Set lazily by Game once the World mesh is built. */
   mesh!: THREE.Object3D;
@@ -40,9 +41,10 @@ export class Capital implements HeroTarget {
     this.mesh = mesh;
   }
 
-  applyDamage(amount: number, _sourceHeroId: string, _nowT: number): void {
+  applyDamage(amount: number, _sourceHeroId: string, nowT: number): void {
     if (!this.alive) return;
     this.hp = Math.max(0, this.hp - amount);
+    this.lastHpChangeT = nowT;
     if (this.hp <= 0) this.alive = false;
   }
 
