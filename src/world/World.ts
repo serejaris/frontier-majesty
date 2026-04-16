@@ -34,6 +34,10 @@ export class World {
   readonly navGrid: NavGrid;
   map: GeneratedMap;
 
+  /** The Capital's THREE.Group (built in `build`). Game links this to the
+   *  GameState.capital entity so combat can flash + game can detect loss. */
+  capitalMesh: THREE.Group | null = null;
+
   private groupCapital: THREE.Group;
   private groupSlots: THREE.Group;
   private groupNests: THREE.Group;
@@ -100,6 +104,7 @@ export class World {
       // Propagate pickable tag to children so raycaster finds it via leaf meshes.
       tagChildren(capital, 'capital', 'capital');
       this.groupCapital.add(capital);
+      this.capitalMesh = capital;
     }
 
     // --- Build slots: translucent yellow discs (kept as primitives for M3 pulse).

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { Rng } from '../util/Random.ts';
-import { NESTS, MONSTERS } from '../config/Tuning.ts';
+import { NESTS, MONSTERS, ROAMING } from '../config/Tuning.ts';
 import { createNestMesh } from '../rendering/Silhouettes.ts';
 import type { NestTier } from '../world/MapGenerator.ts';
 import { Monster } from './Monster.ts';
@@ -39,6 +39,8 @@ export class Nest implements HeroTarget {
 
   alive = true;
   private monsterCounter = 0;
+  /** simT of the next roaming dispatch attempt. Lazily initialized on first tick. */
+  private nextRoamerT = -1;
 
   readonly attackers = new Map<string, AttackerRecord>();
 
@@ -109,5 +111,25 @@ export class Nest implements HeroTarget {
     const monster = new Monster(`${this.id}-m${this.monsterCounter}`, this.position.x, this.position.z, sx, sz);
     this.defenders.push(monster);
     return monster;
+  }
+
+  /**
+   * Possibly designate one defender as a roamer marching at `capitalPos` (PRD §11.2).
+   * Fires at most once per `ROAMING.intervalMin..intervalMax` seconds per nest.
+   */
+  maybeSendRoamer(simT: number, capitalPos: { x: number; z: number }, rng: Rng): void {
+    if (!this.alive) return;
+    if (this.nextRoamerT < 0) {
+      this.nextRoamerT = simT + rng.range(ROAMING.intervalMinSec, ROAMING.intervalMaxSec);
+      return;
+    }
+    if (simT < this.nextRoamerT) return;
+    this.nextRoamerT = simT + rng.range(ROAMING.intervalMinSec, ROAMING.intervalMaxSec);
+
+    // Pick a defender that isn't already roaming.
+    const eligible = this.defenders.filter((d) => d.alive && !d.roamingTarget);
+    if (eligible.length === 0) return;
+    const pick = eligible[rng.int(0, eligible.length)]!;
+    pick.roamingTarget = { x: capitalPos.x, z: capitalPos.z };
   }
 }

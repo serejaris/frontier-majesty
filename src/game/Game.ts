@@ -34,6 +34,7 @@ import { Monster } from '../entities/Monster.ts';
 import { Nest } from '../entities/Nest.ts';
 import { CombatSystem } from '../combat/CombatSystem.ts';
 import { xpToNextLevel } from '../progression/Leveling.ts';
+import { HeroAI, STATE_GLYPH } from '../ai/HeroAI.ts';
 
 export interface HudBinding {
   fps: HTMLElement;
@@ -145,6 +146,9 @@ export class Game {
     this.pathfinder = new Pathfinder(this.world.navGrid);
     this.combatRng = createRng((useSeed ^ 0xc0ffee) >>> 0);
 
+    // Wire the Capital mesh up so HitFlash + picking can target it.
+    if (this.world.capitalMesh) this.state.capital.attachMesh(this.world.capitalMesh);
+
     // Seed live Nest entities from the map placements — these own spawn timers.
     const nestsGroup = this.world.root.getObjectByName('nests') as THREE.Group | null;
     for (const np of map.nests) {
@@ -201,6 +205,15 @@ export class Game {
 
     // Seed nest HP bars up-front.
     for (const nest of this.state.nests) this.registerNestOverlays(nest);
+
+    // Capital HP bar.
+    this.healthBars.ensure('capital', () => this.state.capital.alive ? ({
+      worldX: this.state.capital.position.x,
+      worldZ: this.state.capital.position.z,
+      hp: this.state.capital.hp,
+      maxHp: this.state.capital.maxHp,
+      visible: true,
+    }) : null);
 
     this.onPointerDownPick = (e: PointerEvent) => {
       if (e.button !== 0) return;
@@ -349,7 +362,7 @@ export class Game {
     this.state.simT += dt;
     this.state.treasury.tick(dt);
 
-    // Nest spawn timers.
+    // Nest spawn timers + roamer dispatch.
     for (const nest of this.state.nests) {
       if (!nest.alive) continue;
       const worldMonsterCount = this.state.monsters.length;
@@ -357,19 +370,16 @@ export class Game {
       if (spawned) {
         this.registerMonster(spawned);
       }
+      nest.maybeSendRoamer(this.state.simT, this.state.capital.position, this.combatRng);
     }
 
-    // Monsters act.
-    for (const m of this.state.monsters) {
-      m.update(dt, this.state.simT, this.state.heroes, this.combatRng);
-    }
-
-    // Heroes advance (movement + regen).
+    // Heroes plan (AI FSM) — sets target + destination.
     for (const h of this.state.heroes) {
-      h.update(dt, this.state, this.world.navGrid, this.pathfinder, this.state.simT);
+      if (!h.ai) h.ai = new HeroAI();
+      h.ai.tick(h, dt, this.state, this.world.navGrid, this.pathfinder);
     }
 
-    // Combat resolves: targeting, attacks, deaths, rewards.
+    // Combat resolves: validate target, swing on cooldown, deaths + rewards.
     this.combat.tick(
       {
         simT: this.state.simT,
@@ -385,6 +395,19 @@ export class Game {
         onNestDestroyed: (n) => this.onNestDestroyed(n),
       },
     );
+
+    // Monsters act (pursuit, aggro, leash, capital attack, roaming).
+    for (const m of this.state.monsters) {
+      m.update(dt, this.state.simT, this.state.heroes, this.combatRng, this.state.capital);
+    }
+
+    // Heroes advance (movement + regen) — uses targets set by AI / combat.
+    for (const h of this.state.heroes) {
+      h.update(dt, this.state, this.world.navGrid, this.pathfinder, this.state.simT);
+    }
+
+    // Capital weak defense aura tick.
+    this.state.capital.tickAura(dt, this.state.monsters, this.state.simT);
   }
 
   private updateHud(frameDt: number): void {
@@ -569,6 +592,9 @@ export class Game {
     hero.anchorX = bx;
     hero.anchorZ = bz;
 
+    // Attach AI controller (M5).
+    hero.ai = new HeroAI();
+
     this.state.heroes.push(hero);
     this.world.root.add(hero.mesh);
     this.registerHeroOverlays(hero);
@@ -584,12 +610,12 @@ export class Game {
     }) : null);
     this.statusIcons.ensure(hero.id, () => {
       if (!hero.alive) return null;
-      if (this.state.simT < hero.rallyUntil) {
-        return { worldX: hero.position.x, worldZ: hero.position.z, glyph: 'RALLY' };
+      const state = hero.aiState;
+      // Rally + patrol read as quiet states — keep them unobtrusive (no glyph).
+      if (state === 'patrol') {
+        return { worldX: hero.position.x, worldZ: hero.position.z, glyph: null };
       }
-      const glyph = hero.inCombat && (this.state.simT - 0) >= 0 && hero.combatCooldown < 1.0
-        ? 'ATK'
-        : null;
+      const glyph = STATE_GLYPH[state] ?? null;
       return { worldX: hero.position.x, worldZ: hero.position.z, glyph };
     });
   }
@@ -658,11 +684,11 @@ export class Game {
       level: hero.level,
       hp: hero.hp,
       maxHp: hero.maxHp,
-      hasPotion: false,
-      weaponTier: 0,
-      armorTier: 0,
+      hasPotion: hero.potionCount > 0,
+      weaponTier: hero.weaponTier,
+      armorTier: hero.armorTier,
       personalGold: Math.floor(hero.personalGold),
-      aiState: this.state.simT < hero.rallyUntil ? 'rally' : hero.inCombat ? 'combat' : 'idle',
+      aiState: hero.aiState,
       xp: Math.floor(hero.xp),
       xpToNext: xpToNextLevel(hero.xp),
     });

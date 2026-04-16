@@ -6,13 +6,17 @@ import { createBlobShadow } from '../rendering/BlobShadows.ts';
 import { COMBAT, HEROES } from '../config/Tuning.ts';
 import { distance2d } from '../util/Math.ts';
 import { levelForXp } from '../progression/Leveling.ts';
+import type { AbilityCallbacks, IncomingContext } from '../progression/Abilities.ts';
+import type { HeroAI, HeroState } from '../ai/HeroAI.ts';
+import { applyWarriorLevelAbilities } from '../progression/WarriorStats.ts';
+import { applyArcherLevelAbilities } from '../progression/ArcherStats.ts';
 
 export type HeroKind = 'warrior' | 'archer';
 
-/** A thing a hero can attack. Implemented by Monster and Nest. */
+/** A thing a hero can attack. Implemented by Monster, Nest, Capital. */
 export interface HeroTarget {
   id: string;
-  type: 'monster' | 'nest';
+  type: 'monster' | 'nest' | 'capital';
   alive: boolean;
   position: { x: number; z: number };
   hp: number;
@@ -27,13 +31,16 @@ export interface HeroPosition {
   z: number;
 }
 
+/** Tier index (0..3) for a single equipment slot. */
+export type EquipmentTier = 0 | 1 | 2 | 3;
+
 /**
- * Base class for Warrior / Archer. Subclasses set the visual and stat floor
- * in their constructor — this class owns the shared simulation logic:
- * movement (direct or pathfinder-backed), attack cooldowns, regen, leveling.
+ * Base class for Warrior / Archer.
  *
- * M4 is "combat-only" — the full AI FSM (Retreat, Shop, etc.) lands in M5.
- * The behavior here is a minimal: rally → seek nearest target → attack → regen.
+ * Subclasses set the visual + class-base stat floor in the constructor — this
+ * class owns shared simulation logic: movement (direct or A*), regen, leveling,
+ * tier-based stat overlay, and an `ai` field that drives the FSM each tick
+ * (HeroAI from M5).
  */
 export abstract class Hero {
   readonly id: string;
@@ -51,9 +58,12 @@ export abstract class Hero {
   personalGold: number;
 
   moveSpeed: number;
-  baseDamage: number;
-  attackRate: number;
-  attackRange: number;
+
+  // ---- Class-base stats (set by Warrior/Archer.applyLevelStats). ----
+  /** Per-level base damage from class stats table. Effective `baseDamage` folds in tiers/buffs. */
+  classBaseDamage: number;
+  classBaseAttackRate: number;
+  classBaseAttackRange: number;
 
   lastAttackT = -Infinity;
   currentTarget: HeroTarget | null = null;
@@ -63,6 +73,10 @@ export abstract class Hero {
   inCombat = false;
   /** Time elapsed since we last dealt or received damage. Drives regen gate. */
   combatCooldown = Infinity;
+  /** Time of last in-combat event (sec). Used by 6s out-of-combat shop gate. */
+  lastInCombatT = -Infinity;
+  /** Tracks how long we've been continuously in combat — for the AI 6s gate logic. */
+  aiCombatTimer = 0;
 
   /** Seconds-since-game-start anchor we use to time rally + attacks. */
   protected simT = 0;
@@ -75,6 +89,33 @@ export abstract class Hero {
   anchorZ: number;
 
   alive = true;
+
+  // ---- M5 fields ----
+  /** AI controller — assigned by Game on recruit. */
+  ai!: HeroAI;
+  /** Equipment tiers: 0 = nothing bought yet, 3 = max. */
+  weaponTier: EquipmentTier = 0;
+  armorTier: EquipmentTier = 0;
+  /** Healing potions in inventory (cap is 1 + perkMods.potionCarryBonus). */
+  potionCount = 0;
+  /** Has this hero ever bought a smith upgrade? Drives the first-purchase discount. */
+  firstSmithPurchaseMade = false;
+  /** Cooldown timers keyed by ability id (seconds remaining). */
+  readonly cooldowns: Record<string, number> = {};
+  /** Buff timers (seconds remaining); generic — folded into `attackRate` etc. */
+  readonly buffs: { attackRatePct: number; attackRateRemaining: number } = {
+    attackRatePct: 0,
+    attackRateRemaining: 0,
+  };
+  /** Damage-reduction buff (Last Stand, etc.) as fractional reduction. */
+  damageReductionBuff = 0;
+  damageReductionRemaining = 0;
+  /** Tracks "first time HP < 25%" for Last Stand. */
+  lastStandTriggered = false;
+  /** Hit counter for cleave/focus-shot procs. */
+  attackCount = 0;
+  /** Ability hooks attached by class progression. */
+  readonly abilities: AbilityCallbacks[] = [];
 
   protected constructor(
     id: string,
@@ -98,10 +139,10 @@ export abstract class Hero {
 
     this.maxHp = stats.maxHp;
     this.hp = stats.maxHp;
-    this.baseDamage = stats.damage;
-    this.attackRate = stats.attackRate;
+    this.classBaseDamage = stats.damage;
+    this.classBaseAttackRate = stats.attackRate;
     this.moveSpeed = stats.moveSpeed;
-    this.attackRange = stats.attackRange;
+    this.classBaseAttackRange = stats.attackRange;
 
     this.level = 1;
     this.xp = 0;
@@ -122,17 +163,61 @@ export abstract class Hero {
   /** Apply stats derived from a new level. Subclasses implement per-class scaling. */
   abstract applyLevelStats(prevMaxHp: number): void;
 
+  /** Hook to install ability callbacks on level-up. Called after `applyLevelStats`. */
+  protected installLevelAbilities(): void {
+    if (this.kind === 'warrior') applyWarriorLevelAbilities(this);
+    else applyArcherLevelAbilities(this);
+  }
+
+  // ---- Effective combat stats (tier + perk + buff overlay). ----
+
+  /** Effective base damage applied per swing — class base × weapon tier × buffs. */
+  get baseDamage(): number {
+    return this.classBaseDamage * weaponDamageMult(this.weaponTier);
+  }
+
+  /** Effective attacks-per-second — class base × weapon T2 (warrior) × ability buffs. */
+  get attackRate(): number {
+    let rate = this.classBaseAttackRate;
+    if (this.kind === 'warrior' && this.weaponTier >= 2) {
+      // Warrior weapon T2 secondary: +12% attack speed; T3 stacks another +5%.
+      rate *= 1.12;
+      if (this.weaponTier >= 3) rate *= 1.05;
+    }
+    if (this.buffs.attackRateRemaining > 0) rate *= 1 + this.buffs.attackRatePct;
+    return rate;
+  }
+
+  /** Effective attack range — class base × archer T2/T3 range bonus. */
+  get attackRange(): number {
+    let r = this.classBaseAttackRange;
+    if (this.kind === 'archer' && this.weaponTier >= 2) {
+      r *= 1.10; // T2 secondary
+      if (this.weaponTier >= 3) r *= 1.08; // T3 signature pierce/range bump
+    }
+    return r;
+  }
+
+  /** Effective damage reduction (0..1) from armor tier + buff stacks. */
+  get damageReduction(): number {
+    let dr = 0;
+    if (this.armorTier >= 2) dr += 0.10;
+    if (this.armorTier >= 3) dr += 0.15;
+    if (this.damageReductionRemaining > 0) dr = Math.min(0.85, dr + this.damageReductionBuff);
+    return dr;
+  }
+
   /** Set the rally-until timestamp relative to the current simulation time. */
   startRally(simT: number, seconds: number = HEROES.rallySeconds): void {
     this.rallyUntil = simT + seconds;
   }
 
   /**
-   * Advance the hero one fixed step.
+   * Advance the hero one fixed step. The AI FSM (`hero.ai.tick`) sets the
+   * destination + state, then this method advances movement and regen.
    *
-   * `nav`/`pathfinder` are available if the hero needs to route around an
-   * obstacle — in M4 we try a straight-line dash first, and fall back to A*
-   * only when the target is far and the straight path is blocked.
+   * Rally is honored here: during rally we just sit still and let the regen
+   * tick.
    */
   update(
     dt: number,
@@ -147,14 +232,32 @@ export abstract class Hero {
     // Drop the in-combat flag once the window since last hit has elapsed.
     if (this.combatCooldown >= HEROES.regenCooldownSeconds) {
       this.inCombat = false;
+      this.aiCombatTimer = 0;
+    } else {
+      this.aiCombatTimer += dt;
     }
+
+    // Tick down ability buffs / cooldowns.
+    for (const k of Object.keys(this.cooldowns)) {
+      this.cooldowns[k] = Math.max(0, this.cooldowns[k]! - dt);
+    }
+    if (this.buffs.attackRateRemaining > 0) {
+      this.buffs.attackRateRemaining = Math.max(0, this.buffs.attackRateRemaining - dt);
+      if (this.buffs.attackRateRemaining === 0) this.buffs.attackRatePct = 0;
+    }
+    if (this.damageReductionRemaining > 0) {
+      this.damageReductionRemaining = Math.max(0, this.damageReductionRemaining - dt);
+      if (this.damageReductionRemaining === 0) this.damageReductionBuff = 0;
+    }
+    for (const ab of this.abilities) ab.onTick?.(this, dt, simT);
 
     // Rally: stand still near barracks for a short beat after spawn.
     if (simT < this.rallyUntil) {
       return;
     }
 
-    // Regen (PRD §10.6).
+    // Regen — gated by AI state via `regenAllowed` flag set by HeroAI when in
+    // recover or out-of-combat patrol.
     this.tickRegen(dt);
 
     // Movement toward a target position if we have one.
@@ -163,9 +266,14 @@ export abstract class Hero {
 
   receiveDamage(amount: number): void {
     if (!this.alive) return;
-    this.hp = Math.max(0, this.hp - amount);
+    let dmg = amount * (1 - this.damageReduction);
+    const ctx: IncomingContext = { damage: dmg };
+    for (const ab of this.abilities) ab.onIncomingDamage?.(this, ctx, this.simT);
+    dmg = Math.max(0, ctx.damage);
+    this.hp = Math.max(0, this.hp - dmg);
     this.inCombat = true;
     this.combatCooldown = 0;
+    this.lastInCombatT = this.simT;
     if (this.hp <= 0) {
       this.alive = false;
     }
@@ -181,11 +289,29 @@ export abstract class Hero {
       const prevMax = this.maxHp;
       this.level = newLvl;
       this.applyLevelStats(prevMax);
+      this.installLevelAbilities();
     }
+  }
+
+  /** Drink a healing potion if any are carried. Returns true if applied. */
+  applyPotion(): boolean {
+    if (this.potionCount <= 0) return false;
+    if (!this.alive) return false;
+    this.potionCount -= 1;
+    this.hp = Math.min(this.maxHp, this.hp + this.maxHp * HEROES.potionHealFraction);
+    return true;
+  }
+
+  /** Stamp the AI state for status icons / hero card. */
+  get aiState(): HeroState {
+    return this.ai ? this.ai.current : 'spawn-rally';
   }
 
   /** Point a hero at a new destination. Clears the cached path so it replans. */
   setDestination(x: number, z: number): void {
+    if (this.targetPosition && Math.abs(this.targetPosition.x - x) < 1 && Math.abs(this.targetPosition.z - z) < 1) {
+      return;
+    }
     this.targetPosition = { x, z };
     this.currentPath = null;
     this.currentPathIndex = 0;
@@ -271,6 +397,7 @@ export abstract class Hero {
     if (this.hp >= this.maxHp) return;
     if (this.combatCooldown < HEROES.regenCooldownSeconds) return;
     const inSafeZone = Math.hypot(this.position.x, this.position.z) < HEROES.safeZoneRadius;
+    // PRD §10.6: 1% out-of-combat in world; 4% in safe zone (also implicit "Recover" state).
     const rate = inSafeZone ? HEROES.safeZoneRegenPerSec : HEROES.worldRegenPerSec;
     this.hp = Math.min(this.maxHp, this.hp + this.maxHp * rate * dt);
   }
@@ -291,4 +418,37 @@ export function isLineOfSightClear(
     if (nav.isBlocked(c.cx, c.cy)) return false;
   }
   return true;
+}
+
+/**
+ * PRD §14.3 weapon damage multipliers (cumulative).
+ *  T1 = +15%  → ×1.15
+ *  T2 = +15% on top → ×1.15 × 1.15 = ×1.3225
+ *  T3 = +20% on top → ×1.5870
+ */
+function weaponDamageMult(tier: EquipmentTier): number {
+  switch (tier) {
+    case 0:
+      return 1;
+    case 1:
+      return 1.15;
+    case 2:
+      return 1.15 * 1.15;
+    case 3:
+      return 1.15 * 1.15 * 1.20;
+  }
+}
+
+/** PRD §14.3 armor HP multiplier (cumulative). T1 +15%, T2 +10% more, T3 +15% more. */
+export function armorHpMult(tier: EquipmentTier): number {
+  switch (tier) {
+    case 0:
+      return 1;
+    case 1:
+      return 1.15;
+    case 2:
+      return 1.15 * 1.10;
+    case 3:
+      return 1.15 * 1.10 * 1.15;
+  }
 }

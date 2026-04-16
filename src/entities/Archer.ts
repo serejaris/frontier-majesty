@@ -1,4 +1,4 @@
-import { Hero, type HeroPosition } from './Hero.ts';
+import { Hero, type HeroPosition, armorHpMult } from './Hero.ts';
 import { createArcherMesh } from '../rendering/Silhouettes.ts';
 import { archerStatsAt } from '../progression/ArcherStats.ts';
 
@@ -7,16 +7,18 @@ export class Archer extends Hero {
     const stats = archerStatsAt(startLevel);
     super(id, 'archer', position, stats, createArcherMesh(), 14);
     this.level = startLevel;
+    this.installLevelAbilities();
   }
 
   override applyLevelStats(prevMaxHp: number): void {
     const stats = archerStatsAt(this.level);
     const ratio = prevMaxHp > 0 ? this.hp / prevMaxHp : 1;
-    this.maxHp = stats.maxHp;
-    this.hp = Math.min(this.maxHp, Math.max(1, Math.round(stats.maxHp * ratio)));
-    this.baseDamage = stats.damage;
-    this.attackRate = stats.attackRate;
+    const armorMult = armorHpMult(this.armorTier);
+    this.maxHp = Math.round(stats.maxHp * armorMult);
+    this.hp = Math.min(this.maxHp, Math.max(1, Math.round(this.maxHp * ratio)));
+    this.classBaseDamage = stats.damage;
+    this.classBaseAttackRate = stats.attackRate;
     this.moveSpeed = stats.moveSpeed;
-    this.attackRange = stats.attackRange;
+    this.classBaseAttackRange = stats.attackRange;
   }
 }

@@ -8,6 +8,7 @@ import { PERK_POOL } from '../config/PerkPool.ts';
 import type { Hero } from '../entities/Hero.ts';
 import type { Monster } from '../entities/Monster.ts';
 import type { Nest } from '../entities/Nest.ts';
+import { Capital } from '../entities/Capital.ts';
 
 /**
  * Central mutable state. Intentionally permissive — later milestones extend it.
@@ -35,6 +36,8 @@ export class GameState {
   nestsDestroyed = 0;
   readonly perks: PerkManager;
   readonly perkMods: PerkMods;
+  /** The Capital — loss condition + weak defense aura (PRD §7.1). */
+  readonly capital: Capital;
 
   constructor(seed: number, map: GeneratedMap) {
     this.seed = seed;
@@ -47,5 +50,6 @@ export class GameState {
       ECONOMY.startingGold,
       () => this.perkMods.goldTickMultiplier ?? 1,
     );
+    this.capital = new Capital({ x: map.capital.x, z: map.capital.z });
   }
 }

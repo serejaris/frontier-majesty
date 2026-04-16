@@ -5,9 +5,10 @@ import { distance2d } from '../util/Math.ts';
 import { createMonsterMesh } from '../rendering/Silhouettes.ts';
 import { createBlobShadow } from '../rendering/BlobShadows.ts';
 import type { Hero, HeroTarget } from './Hero.ts';
+import type { Capital } from './Capital.ts';
 
 export type MonsterKind = 'grunt';
-export type MonsterState = 'patrol' | 'aggro' | 'leash';
+export type MonsterState = 'patrol' | 'aggro' | 'leash' | 'roaming';
 
 interface MonsterPosition {
   x: number;
@@ -21,8 +22,14 @@ interface AttackerRecord {
 }
 
 /**
- * Minimal monster — patrol → aggro → leash per PRD §11.1.
- * One `kind` in M4 ("grunt"); variants land in M5.
+ * Monster — patrol → aggro → leash, with M5 additions:
+ *
+ *  - When no hero in aggro range AND capital within `aggroRadius`-ish, attacks
+ *    capital directly (PRD M5).
+ *  - When `roamingTarget` is set by Nest.maybeSendRoamer, marches at a fixed
+ *    target (usually the capital) until reached or interrupted by hero aggro.
+ *
+ * The combat loop continues to use `applyDamage` for HP / reward attribution.
  */
 export class Monster implements HeroTarget {
   readonly id: string;
@@ -40,6 +47,9 @@ export class Monster implements HeroTarget {
 
   state: MonsterState = 'patrol';
   targetHero: Hero | null = null;
+  targetCapital: Capital | null = null;
+  /** When set, monster ignores leash and marches at this point. */
+  roamingTarget: { x: number; z: number } | null = null;
   lastAttackT = -Infinity;
   alive = true;
 
@@ -93,8 +103,15 @@ export class Monster implements HeroTarget {
   /**
    * Advance the monster: pick a hero target in aggroRadius, pursue until
    * leashRadius, attack in melee. Patrol jitter around home when idle.
+   * Capital becomes a fallback target if no hero is near.
    */
-  update(dt: number, simT: number, heroes: readonly Hero[], rng: Rng): void {
+  update(
+    dt: number,
+    simT: number,
+    heroes: readonly Hero[],
+    rng: Rng,
+    capital?: Capital,
+  ): void {
     if (!this.alive) return;
 
     // 1. Decide state.
@@ -108,17 +125,19 @@ export class Monster implements HeroTarget {
         nearest.position.x,
         nearest.position.z,
       );
-      if (this.state === 'patrol' || this.state === 'leash') {
+      if (this.state === 'patrol' || this.state === 'leash' || this.state === 'roaming') {
         if (dHero <= MONSTERS.aggroRadius) {
           this.state = 'aggro';
           this.targetHero = nearest;
+          this.targetCapital = null;
         }
       } else if (this.state === 'aggro') {
         if (!this.targetHero || !this.targetHero.alive) {
           this.targetHero = nearest;
         }
-        const dFromHome = dHome;
-        if (dFromHome > MONSTERS.pursuitRadius) {
+        if (this.roamingTarget) {
+          // Roamers ignore leash — they're committed to the capital.
+        } else if (dHome > MONSTERS.pursuitRadius) {
           this.state = 'leash';
           this.targetHero = null;
         } else if (this.targetHero) {
@@ -136,8 +155,13 @@ export class Monster implements HeroTarget {
         }
       }
     } else if (this.state === 'aggro') {
-      this.state = 'leash';
+      this.state = this.roamingTarget ? 'roaming' : 'leash';
       this.targetHero = null;
+    }
+
+    // Roamer transition — if not currently aggro and we have a roamingTarget, march.
+    if (this.roamingTarget && this.state !== 'aggro') {
+      this.state = 'roaming';
     }
 
     // 2. Pick destination based on state.
@@ -149,7 +173,7 @@ export class Monster implements HeroTarget {
           // Attack if in melee.
           const dTgt = distance2d(this.position.x, this.position.z, tgt.position.x, tgt.position.z);
           if (dTgt <= MONSTERS.meleeRange) {
-            this.tryMelee(simT, tgt);
+            this.tryMeleeHero(simT, tgt);
           }
         }
         break;
@@ -164,9 +188,36 @@ export class Monster implements HeroTarget {
         break;
       }
       case 'patrol': {
+        // While patrolling, opportunistically attack capital if it's right there
+        // (e.g. nest is close to capital — unusual but PRD requires this fallback).
+        if (capital && capital.alive) {
+          const dCap = distance2d(this.position.x, this.position.z, capital.position.x, capital.position.z);
+          if (dCap <= 300) {
+            this.targetCapital = capital;
+            this.dest = { x: capital.position.x, z: capital.position.z };
+            if (dCap <= MONSTERS.meleeRange + 80) {
+              this.tryMeleeCapital(simT, capital);
+            }
+            break;
+          }
+        }
         if (!this.dest || simT >= this.nextPatrolRepickT) {
           this.pickPatrolDest(rng);
           this.nextPatrolRepickT = simT + MONSTERS.patrolRepickPeriod;
+        }
+        break;
+      }
+      case 'roaming': {
+        if (!this.roamingTarget) {
+          this.state = 'leash';
+          break;
+        }
+        this.dest = { x: this.roamingTarget.x, z: this.roamingTarget.z };
+        if (capital && capital.alive) {
+          const dCap = distance2d(this.position.x, this.position.z, capital.position.x, capital.position.z);
+          if (dCap <= MONSTERS.meleeRange + 80) {
+            this.tryMeleeCapital(simT, capital);
+          }
         }
         break;
       }
@@ -191,11 +242,18 @@ export class Monster implements HeroTarget {
     }
   }
 
-  private tryMelee(simT: number, hero: Hero): void {
+  private tryMeleeHero(simT: number, hero: Hero): void {
     const period = 1 / Math.max(0.01, this.attackRate);
     if (simT - this.lastAttackT < period) return;
     this.lastAttackT = simT;
     hero.receiveDamage(this.baseDamage);
+  }
+
+  private tryMeleeCapital(simT: number, capital: Capital): void {
+    const period = 1 / Math.max(0.01, this.attackRate);
+    if (simT - this.lastAttackT < period) return;
+    this.lastAttackT = simT;
+    capital.applyDamage(this.baseDamage, this.id, simT);
   }
 
   private pickPatrolDest(rng: Rng): void {

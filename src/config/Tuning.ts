@@ -88,6 +88,36 @@ export const HEROES = {
   /** Aggro radius for a hero picking a monster target. */
   aggroRadius: 420,
 
+  // ---------------- M5 AI tuning ----------------
+  /** AI reconsider period (seconds). PRD §10. */
+  aiReconsiderPeriod: 0.5,
+  /** Healing potion restores this fraction of max HP. */
+  potionHealFraction: 0.40,
+  /** Warrior auto-drinks potion at this HP fraction. */
+  warriorPotionThreshold: 0.35,
+  /** Archer auto-drinks potion at this HP fraction. */
+  archerPotionThreshold: 0.45,
+  /** Warrior retreats below this HP fraction (no potion). */
+  warriorRetreatThreshold: 0.20,
+  /** Archer retreats below this HP fraction (no potion). */
+  archerRetreatThreshold: 0.30,
+  /** Warrior re-enters combat once HP rises above this fraction. */
+  warriorResumeThreshold: 0.75,
+  /** Archer re-enters combat once HP rises above this fraction. */
+  archerResumeThreshold: 0.80,
+  /** Archer kiting band — try to stay between min/max from melee enemy. */
+  archerKiteMin: 220,
+  archerKiteMax: 320,
+  /** Hero must be out of combat at least this long to leave field for shopping. */
+  outOfCombatForServiceSeconds: 6,
+  /** Trigger AssistAlly if a friendly within this radius is in combat. */
+  assistAllyRadius: 240,
+  /** Capital is "under threat" if any monster is within this radius of capital. */
+  capitalThreatRadius: 500,
+  /** Patrol ring around capital. */
+  patrolRingMin: 600,
+  patrolRingMax: 900,
+
   warrior: {
     maxHp: 120,
     damage: 12,
@@ -103,6 +133,23 @@ export const HEROES = {
     moveSpeed: 100,
     attackRange: 260,
   },
+} as const;
+
+/** Capital health + auto-defense aura. PRD §7.1. */
+export const CAPITAL = {
+  maxHp: 1500,
+  /** Aura radius — monsters inside take aura damage. */
+  auraRadius: 350,
+  /** Damage per aura tick (one nearest monster). */
+  weakAuraDamage: 4,
+  /** Period between aura ticks (seconds). */
+  weakAuraRate: 1.0,
+} as const;
+
+/** Per-nest roaming-monster dispatch interval (seconds). PRD §11.2. */
+export const ROAMING = {
+  intervalMinSec: 45,
+  intervalMaxSec: 60,
 } as const;
 
 /** Monster base stats. PRD §11. */
