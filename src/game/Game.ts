@@ -1,9 +1,15 @@
 import * as THREE from 'three';
 import { Clock } from './Clock.ts';
 import { GameState } from './GameState.ts';
+import { PauseController } from './PauseController.ts';
 import { createRenderer } from '../rendering/Renderer.ts';
 import { addLighting } from '../rendering/Lighting.ts';
 import { StrategicCamera } from '../rendering/Camera.ts';
+import { HealthBars } from '../rendering/HealthBars.ts';
+import { StatusIcons } from '../rendering/StatusIcons.ts';
+import { HitFlash } from '../rendering/HitFlash.ts';
+import { HeroCard } from '../ui/HeroCard.ts';
+import { EndScreen } from '../ui/EndScreen.ts';
 import { CameraInput } from '../input/CameraInput.ts';
 import { pickAt } from '../input/Picking.ts';
 import { createGround, createMapGrid } from '../world/Ground.ts';
@@ -32,6 +38,11 @@ export interface HudBinding {
 export interface GameBindings {
   hud: HudBinding;
   uiRoot: HTMLElement;
+}
+
+export interface GameUi {
+  heroCard: HeroCard;
+  endScreen: EndScreen;
 }
 
 const BUILDING_COSTS: Record<BuildingKind, number> = {
@@ -68,6 +79,13 @@ export class Game {
   private readonly perkRng: Rng;
   private perkPicking = false;
 
+  private readonly pause: PauseController;
+  private readonly worldOverlay: HTMLElement;
+  private readonly healthBars: HealthBars;
+  private readonly statusIcons: StatusIcons;
+  private readonly hitFlash: HitFlash;
+  readonly ui: GameUi;
+
   private rafId = 0;
   private running = false;
   private frameCounter = 0;
@@ -75,6 +93,9 @@ export class Game {
   private fpsSmoothed = 0;
 
   private debugPathNode: THREE.LineSegments | null = null;
+
+  private demoHpVisible = true;
+  private readonly demoHpState = { hp: 37, max: 120 };
 
   private readonly onPointerDownPick: (e: PointerEvent) => void;
   private readonly onPointerUpPick: (e: PointerEvent) => void;
@@ -117,6 +138,18 @@ export class Game {
     this.cam.panTo(map.capital.x, map.capital.z);
     this.input = new CameraInput(this.canvas, this.cam);
 
+    this.pause = new PauseController();
+    this.worldOverlay = ensureWorldOverlay();
+    this.healthBars = new HealthBars(this.worldOverlay);
+    this.statusIcons = new StatusIcons(this.worldOverlay);
+    this.hitFlash = new HitFlash();
+    this.ui = {
+      heroCard: new HeroCard(),
+      endScreen: new EndScreen(() => {
+        this.ui.endScreen.hide();
+      }),
+    };
+
     this.onPointerDownPick = (e: PointerEvent) => {
       if (e.button !== 0) return;
       this.pointerDownX = e.clientX;
@@ -146,14 +179,31 @@ export class Game {
     this.canvas.addEventListener('pointerup', this.onPointerUpPick);
 
     this.onKeyDownDebug = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (k === 'p') {
-        this.toggleDebugPath();
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
         return;
       }
-      if (k === 'k') {
+      const key = e.key.toLowerCase();
+      if (key === 'p') {
+        this.toggleDebugPath();
+      } else if (key === 'k') {
         void this.triggerPerkPick();
-        return;
+      } else if (key === 'h') {
+        this.toggleDemoHeroCard();
+      } else if (key === 'l') {
+        this.toggleDemoHpBar();
+      } else if (key === 'u') {
+        this.ui.endScreen.show({
+          outcome: 'victory',
+          seed: this.state.seed,
+          durationSec: 630,
+          perks: ['Royal Tax'],
+          heroesAlive: 3,
+          nestsDestroyed: 5,
+        });
       }
     };
     window.addEventListener('keydown', this.onKeyDownDebug);
@@ -193,14 +243,31 @@ export class Game {
     for (const b of this.state.buildings) b.dispose();
     this.world.dispose();
     this.perkPicker.dispose();
+    this.pause.dispose();
+    this.healthBars.dispose();
+    this.statusIcons.dispose();
+    this.hitFlash.dispose();
+    this.ui.heroCard.dispose();
+    this.ui.endScreen.dispose();
     this.disposeRenderer();
   }
 
   private step(): void {
-    const frameDt = this.clock.tick((dt) => {
-      this.update(dt);
-    });
+    let frameDt: number;
+    if (this.pause.isPaused()) {
+      frameDt = this.clock.tickIdle();
+    } else {
+      frameDt = this.clock.tick((dt) => {
+        this.update(dt);
+      });
+    }
     this.input.update(frameDt);
+
+    this.hitFlash.update(frameDt);
+    const vp = { w: this.host.clientWidth, h: this.host.clientHeight };
+    this.healthBars.update(this.cam.camera, vp);
+    this.statusIcons.update(this.cam.camera, vp);
+
     this.renderer.render(this.scene, this.cam.camera);
     this.hudView.update(this.state.treasury.gold);
     this.buildMenu.setGold(this.state.treasury.gold);
@@ -358,6 +425,44 @@ export class Game {
     }
   }
 
+  // ---------- M8 demo hotkeys ----------
+
+  private toggleDemoHeroCard(): void {
+    if (this.ui.heroCard.isVisible()) {
+      this.ui.heroCard.hide();
+      return;
+    }
+    this.ui.heroCard.show({
+      class: 'warrior',
+      level: 3,
+      hp: 74,
+      maxHp: 120,
+      hasPotion: true,
+      weaponTier: 2,
+      armorTier: 1,
+      personalGold: 48,
+      aiState: 'advancing',
+      xp: 140,
+      xpToNext: 220,
+    });
+  }
+
+  private toggleDemoHpBar(): void {
+    this.demoHpVisible = !this.demoHpVisible;
+    const id = 'demo-hp';
+    if (!this.demoHpVisible) {
+      this.healthBars.remove(id);
+      return;
+    }
+    this.healthBars.ensure(id, () => ({
+      worldX: 0,
+      worldZ: 200,
+      hp: this.demoHpState.hp,
+      maxHp: this.demoHpState.max,
+      visible: true,
+    }));
+  }
+
   // ---------- Debug A* path ----------
 
   private toggleDebugPath(): void {
@@ -399,4 +504,19 @@ export class Game {
     this.renderer.setSize(this.host.clientWidth, this.host.clientHeight, false);
     this.cam.resize(this.host.clientWidth / this.host.clientHeight);
   };
+}
+
+function ensureWorldOverlay(): HTMLElement {
+  const existing = document.getElementById('world-overlay');
+  if (existing) return existing;
+  const el = document.createElement('div');
+  el.id = 'world-overlay';
+  Object.assign(el.style, {
+    position: 'fixed',
+    inset: '0',
+    pointerEvents: 'none',
+    overflow: 'hidden',
+  });
+  document.body.appendChild(el);
+  return el;
 }
