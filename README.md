@@ -1,51 +1,25 @@
 # Frontier Majesty
 
-Browser indirect-strategy MVP in the spirit of Majesty. Three.js + TypeScript.
+Браузерный MVP indirect-strategy игры в духе Majesty: игрок строит экономику, здания и инфраструктуру, а герои действуют автономно. Репозиторий хранит Three.js + TypeScript игру, roadmap M1-M10 и игровую архитектуру.
 
-## Vision
+## Что внутри
 
-Player grows a frontier kingdom through economy, buildings, and hero recruitment, but never directly commands heroes. Infrastructure (barracks, market, blacksmith) is what heroes use autonomously — the player builds the stage, heroes play on it.
+| Путь | Роль |
+|---|---|
+| `docs/PRD.md` | полный product/game spec |
+| `src/game/` | loop, state, clock, events |
+| `src/world/` | map generation, navgrid, pathfinding |
+| `src/entities/` | buildings, heroes, monsters |
+| `src/ai/` | hero/monster AI |
+| `src/rendering/` | Three.js renderer, camera, assets |
+| `src/ui/` | HUD, build menu, end screen |
+| `src/config/` | tuning values и PRD numbers |
 
-Full product spec: [docs/PRD.md](docs/PRD.md).
-
-## Status
-
-M1 (bootstrap) — in progress. Roadmap: M1–M10 milestones tracked in GitHub issues.
-
-## Running locally
+## Запуск
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Open http://localhost:5173.
-
-## Stack
-
-- Three.js (stylized low-poly 3D)
-- TypeScript
-- Vite
-- No framework
-
-## Layout
-
-```
-src/
-  game/         # loop, state, clock, events
-  world/        # map gen, navgrid, pathfinding
-  entities/     # capital, buildings, heroes, monsters, nests
-  ai/           # hero FSM, target priority, monster AI
-  combat/       # auto-combat, damage calc
-  progression/  # leveling, equipment, perks
-  economy/      # treasury, personal wallet, rewards
-  rendering/    # three.js renderer, camera, materials, assets
-  ui/           # DOM overlay (HUD, build menu, perk picker, end screen)
-  input/        # picking, camera input
-  config/       # Tuning.ts — single source of truth for PRD numbers
-  util/         # seeded RNG, math helpers
-```
-
-## License
-
-TBD.
+Открыть `http://localhost:5173`.
